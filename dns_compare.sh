@@ -62,7 +62,15 @@ NC='\033[0m'
 
 log() { echo -e "$1" | tee -a "$LOG_FILE"; }
 log_difference() { echo -e "$1" | tee -a "$DIFF_LOG_FILE"; }
-log_error() { echo -e "$1" | tee -a "$ERROR_LOG_FILE"; }
+log_error() {
+    local ts=$(date '+%Y-%m-%d %H:%M:%S')
+    local domain="${2:-unknown}"
+    local dns_name="${3:-unknown}"
+    local dns_ip="${4:-unknown}"
+    local record_type="${5:-unknown}"
+    local errmsg="$1"
+    echo -e "[$ts] Domain: $domain | DNS: $dns_name ($dns_ip) | Type: $record_type | Error: $errmsg" | tee -a "$ERROR_LOG_FILE"
+}
 log_geoip() { [ "$ENABLE_GEOIP" = "true" ] && echo -e "$1" | tee -a "$GEOIP_LOG_FILE"; }
 
 # ====================================================
@@ -641,7 +649,7 @@ display_results() {
                 printf "    ├─ ${YELLOW}A     : %-10s | %s [No A record found]${NC}\n" "$a_t" "N/A"
             else
                 printf "    ├─ ${BOLD_RED}A     : %-10s | %s [ERROR: %s]${NC}\n" "$a_t" "N/A" "$a_e"
-                log_error "  $dns_name ($dns_ip) A record: $a_e"
+                log_error "$a_e" "$domain" "$dns_name" "$dns_ip" "A"
             fi
 
             # CNAME record
@@ -657,7 +665,7 @@ display_results() {
                 printf "    ├─ ${YELLOW}CNAME : %-10s | %s [No CNAME record found]${NC}\n" "$c_t" "N/A"
             else
                 printf "    ├─ ${BOLD_RED}CNAME : %-10s | %s [ERROR: %s]${NC}\n" "$c_t" "N/A" "$c_e"
-                log_error "  $dns_name ($dns_ip) CNAME record: $c_e"
+                log_error "$c_e" "$domain" "$dns_name" "$dns_ip" "CNAME"
             fi
 
             # MX record
@@ -672,7 +680,7 @@ display_results() {
                 printf "    ├─ ${YELLOW}MX    : %-10s | %s [No MX record found]${NC}\n" "$m_t" "N/A"
             else
                 printf "    ├─ ${BOLD_RED}MX    : %-10s | %s [ERROR: %s]${NC}\n" "$m_t" "N/A" "$m_e"
-                log_error "  $dns_name ($dns_ip) MX record: $m_e"
+                log_error "$m_e" "$domain" "$dns_name" "$dns_ip" "MX"
             fi
 
             # SOA record
@@ -687,7 +695,7 @@ display_results() {
                 printf "    └─ ${YELLOW}SOA   : %-10s | %s [No SOA record found]${NC}\n" "$s_t" "N/A"
             else
                 printf "    └─ ${BOLD_RED}SOA   : %-10s | %s [ERROR: %s]${NC}\n" "$s_t" "N/A" "$s_e"
-                log_error "  $dns_name ($dns_ip) SOA record: $s_e"
+                log_error "$s_e" "$domain" "$dns_name" "$dns_ip" "SOA"
             fi
         elif [ "$rt" = "SOA" ]; then
             # Single SOA record
@@ -713,7 +721,7 @@ display_results() {
                 printf "  ${YELLOW}%-12s (%-15s) : %-10s | %s [No SOA record found]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A"
             else
                 printf "  ${BOLD_RED}%-12s (%-15s) : %-10s | %s [ERROR: %s]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A" "$err"
-                log_error "  $dns_name ($dns_ip): $err"
+                log_error "$err" "$domain" "$dns_name" "$dns_ip" "SOA"
             fi
         else
             # Single record type (A, CNAME, MX)
@@ -746,7 +754,7 @@ display_results() {
                 printf "  ${YELLOW}%-12s (%-15s) : %-10s | %s [No record found]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A"
             else
                 printf "  ${BOLD_RED}%-12s (%-15s) : %-10s | %s [ERROR: %s]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A" "$err"
-                log_error "  $dns_name ($dns_ip): $err"
+                log_error "$err" "$domain" "$dns_name" "$dns_ip" "$rt"
             fi
         fi
     done
@@ -754,9 +762,7 @@ display_results() {
     if [ $has_differences -eq 1 ]; then
         local ts=$(date '+%Y-%m-%d %H:%M:%S')
         log "${BOLD_YELLOW}  ⚠ DNS resolution differences detected for this domain!${NC}"
-        log_difference "\n${BOLD_YELLOW}⚠ DIFFERENCE DETECTED at $ts${NC}"
-        log_difference "${BOLD_YELLOW}Domain: $domain${NC}"
-        log_difference "${BOLD_YELLOW}Record Type: $(get_record_type_name "$record_type")${NC}"
+        log_difference "\n[$ts] DIFFERENCE | Domain: $domain | Record Type: $(get_record_type_name "$record_type")"
         echo "$domain: DIFFERENCES FOUND" >> "$SUMMARY_FILE"
     else
         log "${GREEN}  ✓ All DNS results consistent${NC}"
@@ -827,15 +833,17 @@ init_prometheus() {
     PROM_ERROR_LINES=()
     PROM_NODATA_LINES=()
     PROM_INFO_LINES=()
+    PROM_TIMESTAMP_LINES=()
     PROM_DOMAIN_LIST=()
     PROM_RAW_TMP=()
 }
 
 emit_dns_prometheus() {
-    local domain="$1" record_type="$2" has_diff="$3"
-    shift 3
+    local domain="$1" record_type="$2" category="$3" has_diff="$4"
+    shift 4
     local results=("$@")
     [ -z "$PROM_METRICS_FILE" ] && return
+    [ -z "$category" ] && category="default"
 
     # Store all results per domain for baseline comparison at final write time
     local tmp_file=$(mktemp "${PROMETHEUS_TEXTFILE_DIR}/.dns_domain_XXXXXX")
@@ -843,9 +851,25 @@ emit_dns_prometheus() {
         echo "$r" >> "$tmp_file"
     done
     PROM_RAW_TMP+=("$tmp_file")
-    eval "PROM_DOMAIN_${#PROM_DOMAIN_LIST[@]}=\"$domain\""
-    eval "PROM_RTYPE_${#PROM_DOMAIN_LIST[@]}=\"$record_type\""
+    local idx=${#PROM_DOMAIN_LIST[@]}
+    eval "PROM_DOMAIN_${idx}=\"$domain\""
+    eval "PROM_RTYPE_${idx}=\"$record_type\""
+    eval "PROM_CATEGORY_${idx}=\"$category\""
     PROM_DOMAIN_LIST+=("$domain")
+
+    # Record per-domain/server last-test timestamp
+    for r in "${results[@]}"; do
+        local dns_name=$(echo "$r" | cut -d'|' -f1)
+        local rt=$(echo "$r" | cut -d'|' -f3)
+        local now_ts=$(date '+%s')
+        if [ "$rt" = "ALL" ]; then
+            for sub in A CNAME MX SOA; do
+                PROM_TIMESTAMP_LINES+=("dns_query_last_test_timestamp{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\"} $now_ts")
+            done
+        else
+            PROM_TIMESTAMP_LINES+=("dns_query_last_test_timestamp{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} $now_ts")
+        fi
+    done
 
     for r in "${results[@]}"; do
         local dns_name=$(echo "$r" | cut -d'|' -f1)
@@ -884,18 +908,19 @@ emit_dns_prometheus() {
                 fi
                 case "$s" in
                     SUCCESS)
-                        PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",country_code=\"$country_code\"} $t_ms")
-                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",country_code=\"$country_code\"} 0")
-                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",country_code=\"$country_code\"} 0")
-                        PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
+                        PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
+                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",error_type=\"\"} 0")
+                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",country_code=\"$country_code\"} 0")
+                        PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
                         ;;
                     ERROR)
-                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\"} 1")
-                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\"} 0")
+                        local err_msg=$(echo "$data" | cut -d':' -f5 | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 100)
+                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",error_type=\"$err_msg\"} 1")
+                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\"} 0")
                         ;;
                     NO_RECORD)
-                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\"} 1")
-                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\"} 0")
+                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\"} 1")
+                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",error_type=\"\"} 0")
                         ;;
                 esac
             done
@@ -923,18 +948,19 @@ emit_dns_prometheus() {
             fi
             case "$status" in
                 SUCCESS)
-                    PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",country_code=\"$country_code\"} $t_ms")
-                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",country_code=\"$country_code\"} 0")
-                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",country_code=\"$country_code\"} 0")
-                    PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
+                    PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
+                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
+                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
+                    PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
                     ;;
                 ERROR)
-                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\"} 1")
-                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\"} 0")
+                    local err_msg=$(echo "$r" | cut -d'|' -f8 | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 100)
+                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"$err_msg\"} 1")
+                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 0")
                     ;;
                 NO_RECORD)
-                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\"} 1")
-                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\"} 0")
+                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 1")
+                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
                     ;;
             esac
         fi
@@ -952,6 +978,7 @@ write_prometheus_final() {
     for ((i=0; i<${#PROM_DOMAIN_LIST[@]}; i++)); do
         eval "local domain=\"\$PROM_DOMAIN_${i}\""
         eval "local record_type=\"\$PROM_RTYPE_${i}\""
+        eval "local category=\"\$PROM_CATEGORY_${i:-default}\""
         local tmp_file="${PROM_RAW_TMP[$i]}"
         [ ! -f "$tmp_file" ] && continue
 
@@ -992,9 +1019,9 @@ write_prometheus_final() {
 
         for ((j=0; j<${#srv_names[@]}; j++)); do
             if [ "${srv_values[$j]}" = "$baseline_value" ]; then
-                diff_lines+=("dns_query_difference{domain=\"$domain\",server=\"${srv_names[$j]}\",record_type=\"$record_type\"} 0")
+                diff_lines+=("dns_query_difference{domain=\"$domain\",server=\"${srv_names[$j]}\",record_type=\"$record_type\",category=\"$category\"} 0")
             else
-                diff_lines+=("dns_query_difference{domain=\"$domain\",server=\"${srv_names[$j]}\",record_type=\"$record_type\"} 1")
+                diff_lines+=("dns_query_difference{domain=\"$domain\",server=\"${srv_names[$j]}\",record_type=\"$record_type\",category=\"$category\"} 1")
             fi
         done
     done
@@ -1020,6 +1047,10 @@ write_prometheus_final() {
         echo "# HELP dns_query_difference DNS resolution difference vs baseline server (1=different, 0=consistent)"
         echo "# TYPE dns_query_difference gauge"
         printf '%s\n' "${diff_lines[@]}"
+        echo ""
+        echo "# HELP dns_query_last_test_timestamp Unix timestamp of last test for this domain/server/type"
+        echo "# TYPE dns_query_last_test_timestamp gauge"
+        printf '%s\n' "${PROM_TIMESTAMP_LINES[@]}"
     } > "$PROM_METRICS_FILE" 2>/dev/null
 
     # Summary metrics
@@ -1308,7 +1339,7 @@ for ((didx=0; didx<${#DOMAIN_ORDER[@]}; didx++)); do
     [ $has_err -eq 1 ] && ((err_cnt++))
     [ $has_no -eq 1 ] && ((no_record_cnt++))
     write_to_csv "$domain" "$type" "${results[@]}"
-    emit_dns_prometheus "$domain" "$type" "$diff" "${results[@]}"
+    emit_dns_prometheus "$domain" "$type" "$cat" "$diff" "${results[@]}"
     if [ $current -lt $total ]; then
         if [ $VERBOSE -eq 1 ]; then
             wait_with_countdown $DOMAIN_DELAY "Domain delay"
