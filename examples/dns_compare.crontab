@@ -1,0 +1,13 @@
+# ============================================================
+# DNS Compare - Crontab Configuration
+# ============================================================
+# Install with: crontab /etc/cron.d/dns_compare
+# Or add to existing crontab: crontab -e
+# ============================================================
+
+# Every 5 minutes - run DNS comparison test
+*/5 * * * * /usr/local/bin/dns_compare.sh -f /etc/dns_compare/domains.yaml --prom-dir /run/textfile_collector/ --no-geoip >> /var/log/dns_compare.log 2>&1
+
+# Every 30 minutes - clean old log files (keep last 7 days)
+*/30 * * * * find /var/log/ -name "dns_test_*.log" -mtime +7 -delete 2>/dev/null
+*/30 * * * * find /var/log/ -name "dns_*.log" -mtime +7 -delete 2>/dev/null

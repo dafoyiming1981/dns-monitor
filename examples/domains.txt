@@ -1,0 +1,9 @@
+[bank_core:A]
+b2enew.bankofchina.com
+api.bankofchina.com
+
+[mail_ms:MX]
+morganstanley.com
+
+[cdn_ica:CNAME]
+ica.mydesk.morganstanley.com

@@ -1,0 +1,23 @@
+# ============================================================
+# DNS Compare - Domain Configuration (YAML)
+# ============================================================
+# Supported record types: A, CNAME, MX, SOA, ALL
+# category: optional group label for display and Prometheus stats
+# ============================================================
+
+domains:
+  - domain: b2enew.bankofchina.com
+    type: A
+    category: bank_core
+
+  - domain: api.bankofchina.com
+    type: A
+    category: bank_core
+
+  - domain: morganstanley.com
+    type: MX
+    category: mail_ms
+
+  - domain: ica.mydesk.morganstanley.com
+    type: CNAME
+    category: cdn_ica

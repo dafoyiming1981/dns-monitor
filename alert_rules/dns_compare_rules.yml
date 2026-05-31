@@ -1,0 +1,89 @@
+# ============================================================
+# Prometheus Alert Rules for DNS Compare
+# ============================================================
+# Include this in your Prometheus configuration:
+#
+#   rule_files:
+#     - "dns_compare_rules.yml"
+# ============================================================
+
+groups:
+  - name: dns_compare_alerts
+    interval: 60s
+    rules:
+      # -------------------------------------------------------
+      # DNS Resolution Difference
+      # Triggers when any DNS server returns different results
+      # compared to the baseline (first DNS server)
+      # -------------------------------------------------------
+      - alert: DNSResolutionDifference
+        expr: dns_query_difference{server!=""} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DNS差异检测 - {{ $labels.domain }} ({{ $labels.server }})"
+          description: >
+            DNS服务器 {{ $labels.server }} 对 {{ $labels.domain }}
+            的 {{ $labels.record_type }} 记录解析结果与基线不一致。
+            请检查 DNS 配置和 GSLB 调度策略。
+
+      # -------------------------------------------------------
+      # DNS Query Error
+      # Triggers when a DNS server returns an error
+      # -------------------------------------------------------
+      - alert: DNSQueryError
+        expr: dns_query_error == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DNS查询错误 - {{ $labels.domain }} ({{ $labels.server }})"
+          description: >
+            DNS服务器 {{ $labels.server }} 对 {{ $labels.domain }}
+            的 {{ $labels.record_type }} 记录查询失败。
+
+      # -------------------------------------------------------
+      # DNS No Record Found
+      # Triggers when a DNS server returns no data for a record
+      # -------------------------------------------------------
+      - alert: DNSNoRecordFound
+        expr: dns_query_nodata == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DNS无记录 - {{ $labels.domain }} ({{ $labels.server }})"
+          description: >
+            DNS服务器 {{ $labels.server }} 对 {{ $labels.domain }}
+            的 {{ $labels.record_type }} 记录无数据。
+
+      # -------------------------------------------------------
+      # High Query Latency (optional)
+      # Triggers when any DNS query exceeds 500ms
+      # -------------------------------------------------------
+      - alert: DNSHighLatency
+        expr: dns_query_duration_ms > 500
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "DNS高延迟 - {{ $labels.domain }} ({{ $labels.server }})"
+          description: >
+            DNS服务器 {{ $labels.server }} 对 {{ $labels.domain }}
+            的 {{ $labels.record_type }} 记录查询延迟为 {{ $value }}ms。
+
+      # -------------------------------------------------------
+      # Test Run Stale
+      # Triggers when no test has run for more than 15 minutes
+      # (assumes cron runs every 5 minutes)
+      # -------------------------------------------------------
+      - alert: DNSTestRunStale
+        expr: (time() - dns_test_last_run_timestamp) > 900
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DNS测试任务已停止运行"
+          description: >
+            DNS对比测试已超过 15 分钟未执行，请检查 cron 任务是否正常。

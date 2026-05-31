@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Runtime output
+*.prom
+*.log
+
+# Build artifacts
+*.tar.gz
+
+# Session notes
+SESSION_STATE.md
