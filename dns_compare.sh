@@ -1058,6 +1058,161 @@ compare_with_snapshot() {
     log "${YELLOW}  ${msg}${NC}"
 }
 
+# In daemon mode, initialize output files for each round.
+# Truncates CSV/report files each round; logs are always appended.
+init_daemon_output_files() {
+    echo "Domain,DNS Name,DNS IP,Result (IP[COUNTRY])" > "$A_REPORT_FILE"
+    echo "Domain,DNS Name,DNS IP,Result (CNAME Chain with IP[COUNTRY])" > "$CNAME_REPORT_FILE"
+    echo "Domain,DNS Name,DNS IP,Result" > "$MX_REPORT_FILE"
+    echo "Domain,DNS Name,DNS IP,Result (SOA record - full line from AUTHORITY)" > "$SOA_REPORT_FILE"
+    echo "Domain,DNS Name,DNS IP,Result (TXT record)" > "$TXT_REPORT_FILE"
+}
+
+# Executes one complete round of DNS comparisons across all domains
+run_one_round() {
+    local round_num="$1"
+    log "${CYAN}========== Round $round_num $(date '+%Y-%m-%d %H:%M:%S') ==========${NC}"
+
+    # Initialize output files (daemon mode uses fixed names)
+    if [ "$DAEMON_MODE" = "true" ]; then
+        init_daemon_output_files
+    fi
+
+    # Initialize snapshot temp file for this round
+    if [ "$DAEMON_MODE" = "true" ]; then
+        init_snapshot_round
+    fi
+
+    # Initialize log files
+    if [ "$DAEMON_MODE" = "true" ] && [ "$round_num" -gt 1 ]; then
+        echo "\n--- Round $round_num ---" >> "$LOG_FILE"
+    else
+        echo "Multi-DNS Comparison Test v8.0 - $(date)" > "$LOG_FILE"
+        [ -n "$DOMAIN_FILE" ] && echo "Domain file: $DOMAIN_FILE" >> "$LOG_FILE"
+        [ ${#CMD_DOMAINS[@]} -gt 0 ] && echo "Command-line domains:" >> "$LOG_FILE"
+        for i in "${!CMD_DOMAINS[@]}"; do
+            echo "  - ${CMD_DOMAINS[$i]} (${CMD_TYPES[$i]})" >> "$LOG_FILE"
+        done
+        echo "Max CNAME depth: $MAX_CNAME_DEPTH" >> "$LOG_FILE"
+        echo "CNAME comparison: Chain structure only (final IP ignored)" >> "$LOG_FILE"
+        echo "IP Geolocation: $ENABLE_GEOIP (display only)" >> "$LOG_FILE"
+        echo "========================================" >> "$LOG_FILE"
+    fi
+
+    echo "DNS Difference Log - $(date)" > "$DIFF_LOG_FILE"
+    echo "This file records all DNS resolution discrepancies" >> "$DIFF_LOG_FILE"
+    echo "Note: For CNAME records, differences are based on chain structure" >> "$DIFF_LOG_FILE"
+    echo "========================================" >> "$DIFF_LOG_FILE"
+
+    echo "DNS Error Log - $(date)" > "$ERROR_LOG_FILE"
+    echo "This file records all DNS query errors and failures" >> "$ERROR_LOG_FILE"
+    echo "========================================" >> "$ERROR_LOG_FILE"
+
+    if [ "$ENABLE_GEOIP" = "true" ]; then
+        echo "DNS GeoIP Log - $(date)" > "$GEOIP_LOG_FILE"
+        echo "This file records ip geolocation lookups" >> "$GEOIP_LOG_FILE"
+        echo "========================================" >> "$GEOIP_LOG_FILE"
+    fi
+
+    # Initialize counters
+    total=${#DOMAIN_ORDER[@]}
+    current=0
+    diff_cnt=0
+    err_cnt=0
+    no_record_cnt=0
+
+    # Main domain iteration loop
+    for ((didx=0; didx<${#DOMAIN_ORDER[@]}; didx++)); do
+        domain="${DOMAIN_ORDER[$didx]}"
+        type="${DOMAIN_CONFIG_ARR[$didx]}"
+        cat="${DOMAIN_CATEGORY_ARR[$didx]}"
+
+        log "\n${BLUE}[$((++current))/$total] Testing domain: $domain ($type) — ${#dns_names[@]} DNS servers${NC}"
+        results=()
+        has_err=0
+        has_no=0
+        for i in "${!dns_names[@]}"; do
+            name="${dns_names[$i]}"
+            ip="${dns_ips[$i]}"
+            [ $VERBOSE -eq 1 ] && log -n "  Querying $name... "
+            res=$(resolve_domain "$domain" "$ip" "$name" "$type")
+            [ $VERBOSE -eq 1 ] && log "done"
+            [[ "$res" == *"ERROR"* ]] && has_err=1
+            [[ "$res" == *"NO_RECORD"* ]] && has_no=1
+            results+=("$res")
+
+            # Daemon mode: save to snapshot and detect changes
+            if [ "$DAEMON_MODE" = "true" ]; then
+                local status=$(echo "$res" | cut -d'|' -f4)
+                local raw=$(echo "$res" | cut -d'|' -f6)
+                save_snapshot_record "${domain}@${type}@${name}" "$raw"
+                compare_with_snapshot "$domain" "$type" "$name" "$status" "$raw"
+            fi
+
+            if [ $i -lt $((${#dns_names[@]} - 1)) ]; then
+                if [ $VERBOSE -eq 1 ]; then
+                    wait_with_countdown $QUERY_DELAY "Query delay"
+                else
+                    echo -ne "${YELLOW}  Wait ${QUERY_DELAY}s...${NC}\r"
+                    sleep $QUERY_DELAY
+                    echo -e "${GREEN}  Done${NC}"
+                fi
+            fi
+        done
+        display_results "$domain" "$type" "$cat" "${results[@]}"
+        diff=$?
+        [ $diff -eq 1 ] && ((diff_cnt++))
+        [ $has_err -eq 1 ] && ((err_cnt++))
+        [ $has_no -eq 1 ] && ((no_record_cnt++))
+        write_to_csv "$domain" "$type" "${results[@]}"
+        emit_dns_prometheus "$domain" "$type" "$cat" "$diff" "${results[@]}"
+        if [ $current -lt $total ]; then
+            if [ $VERBOSE -eq 1 ]; then
+                wait_with_countdown $DOMAIN_DELAY "Domain delay"
+            else
+                echo -ne "${YELLOW}Wait ${DOMAIN_DELAY}s...${NC}\r"
+                sleep $DOMAIN_DELAY
+                echo -e "${GREEN}Done${NC}"
+            fi
+        fi
+    done
+
+    log "\n${GREEN}════════════════════════════════════════════════════════════${NC}"
+    log "${GREEN}Round $round_num completed!${NC}"
+    log "${PURPLE}════════════════════════════════════════════════════════════${NC}"
+
+    log "\n${CYAN}Statistics:${NC}"
+    log "  Total domains tested: $total"
+    log "  ${BOLD_YELLOW}Domains with differences: $diff_cnt${NC}"
+    log "  ${YELLOW}Domains with no records: $no_record_cnt${NC}"
+    log "  ${BOLD_RED}Domains with errors: $err_cnt${NC}"
+    log "  Consistent resolutions: $((total - diff_cnt))"
+
+    if [ $diff_cnt -gt 0 ]; then
+        log "\n${BOLD_YELLOW}⚠ Differences were detected in $diff_cnt domain(s)${NC}"
+        log "${BOLD_YELLOW}  Check the difference log for details: $DIFF_LOG_FILE${NC}"
+    fi
+    if [ $no_record_cnt -gt 0 ]; then
+        log "\n${YELLOW}ℹ No records found for $no_record_cnt domain(s)${NC}"
+    fi
+    if [ $err_cnt -gt 0 ]; then
+        log "\n${BOLD_RED}✗ Errors occurred in $err_cnt domain(s)${NC}"
+        log "${BOLD_RED}  Check the error log for details: $ERROR_LOG_FILE${NC}"
+    fi
+
+    # Finalize snapshot for this round
+    if [ "$DAEMON_MODE" = "true" ]; then
+        finalize_snapshot "$(date '+%Y-%m-%dT%H:%M:%S')"
+        if [ "$round_num" -eq 1 ] && [ -f "$SNAPSHOT_FILE" ]; then
+            log "${CYAN}Initial snapshot established${NC}"
+        fi
+    fi
+
+    # Write Prometheus summary metrics
+    run_ts=$(date +%s)
+    write_prometheus_final "$total" "$diff_cnt" "$err_cnt" "$no_record_cnt" "$run_ts"
+}
+
 # ====================================================
 # Main
 # ====================================================
@@ -1150,69 +1305,13 @@ done
 # Initialize Prometheus textfile collector
 init_prometheus
 
-clear
-echo "====================================================="
-echo "          Multi-DNS Comparison Test v8.0"
-echo "          (SOA from AUTHORITY SECTION, TXT auto-categorization, GeoIP display)"
-if [ ${#CMD_DOMAINS[@]} -gt 0 ]; then
-    echo "          (Command-line domain mode)"
-fi
-if [ "$ENABLE_GEOIP" = "true" ]; then
-    echo "          (IP Geolocation: ENABLED - IP[COUNTRY] format)"
-else
-    echo "          (IP Geolocation: DISABLED)"
-fi
-echo "====================================================="
-echo "Start time: $(date)"
-[ -n "$DOMAIN_FILE" ] && echo "Domain file: $DOMAIN_FILE"
-[ ${#CMD_DOMAINS[@]} -gt 0 ] && echo "Command-line domains:"
-for i in "${!CMD_DOMAINS[@]}"; do
-    echo "  - ${CMD_DOMAINS[$i]} (${CMD_TYPES[$i]})"
-done
-echo "Total domains: ${#DOMAIN_ORDER[@]}"
-echo "Max CNAME depth: $MAX_CNAME_DEPTH"
-echo "Log file: $LOG_FILE"
-echo "Difference log: $DIFF_LOG_FILE"
-echo "Error log: $ERROR_LOG_FILE"
-[ "$ENABLE_GEOIP" = "true" ] && echo "GeoIP log: $GEOIP_LOG_FILE"
-echo "Summary file: $SUMMARY_FILE"
-echo "A record report: $A_REPORT_FILE"
-echo "CNAME record report: $CNAME_REPORT_FILE"
-echo "MX record report: $MX_REPORT_FILE"
-echo "SOA record report: $SOA_REPORT_FILE"
-echo "TXT record report: $TXT_REPORT_FILE"
-echo "Delay between DNS queries: ${QUERY_DELAY}s"
-echo "Delay between domains: ${DOMAIN_DELAY}s"
-echo "====================================================="
+# Parse DNS servers
+declare -a dns_names dns_ips
+while IFS='@' read -r name ip; do
+    [ -n "$name" ] && [ -n "$ip" ] && dns_names+=("$name") && dns_ips+=("$ip")
+done <<< "$DNS_SERVERS"
 
-# Initialize log files
-echo "Multi-DNS Comparison Test v8.0 - $(date)" > "$LOG_FILE"
-[ -n "$DOMAIN_FILE" ] && echo "Domain file: $DOMAIN_FILE" >> "$LOG_FILE"
-[ ${#CMD_DOMAINS[@]} -gt 0 ] && echo "Command-line domains:" >> "$LOG_FILE"
-for i in "${!CMD_DOMAINS[@]}"; do
-    echo "  - ${CMD_DOMAINS[$i]} (${CMD_TYPES[$i]})" >> "$LOG_FILE"
-done
-echo "Max CNAME depth: $MAX_CNAME_DEPTH" >> "$LOG_FILE"
-echo "CNAME comparison: Chain structure only (final IP ignored)" >> "$LOG_FILE"
-echo "IP Geolocation: $ENABLE_GEOIP (display only,不影响比较)" >> "$LOG_FILE"
-echo "========================================" >> "$LOG_FILE"
-
-echo "DNS Difference Log - $(date)" > "$DIFF_LOG_FILE"
-echo "This file records all DNS resolution discrepancies" >> "$DIFF_LOG_FILE"
-echo "Note: For CNAME records, differences are based on chain structure" >> "$DIFF_LOG_FILE"
-echo "========================================" >> "$DIFF_LOG_FILE"
-
-echo "DNS Error Log - $(date)" > "$ERROR_LOG_FILE"
-echo "This file records all DNS query errors and failures" >> "$ERROR_LOG_FILE"
-echo "========================================" >> "$ERROR_LOG_FILE"
-
-if [ "$ENABLE_GEOIP" = "true" ]; then
-    echo "DNS GeoIP Log - $(date)" > "$GEOIP_LOG_FILE"
-    echo "This file records IP geolocation lookups" >> "$GEOIP_LOG_FILE"
-    echo "========================================" >> "$GEOIP_LOG_FILE"
-fi
-
-# Initialize CSV files
+# Initialize CSV/report files (daemon mode's run_one_round will re-init these per round)
 if [ "$ENABLE_GEOIP" = "true" ]; then
     echo "Domain,DNS Name,DNS IP,Result (IP[COUNTRY])" > "$A_REPORT_FILE"
     echo "Domain,DNS Name,DNS IP,Result (CNAME Chain with IP[COUNTRY])" > "$CNAME_REPORT_FILE"
@@ -1223,12 +1322,6 @@ fi
 echo "Domain,DNS Name,DNS IP,Result" > "$MX_REPORT_FILE"
 echo "Domain,DNS Name,DNS IP,Result (SOA record - full line from AUTHORITY)" > "$SOA_REPORT_FILE"
 echo "Domain,DNS Name,DNS IP,Result (TXT record)" > "$TXT_REPORT_FILE"
-
-# Parse DNS servers
-declare -a dns_names dns_ips
-while IFS='@' read -r name ip; do
-    [ -n "$name" ] && [ -n "$ip" ] && dns_names+=("$name") && dns_ips+=("$ip")
-done <<< "$DNS_SERVERS"
 
 log "${YELLOW}Test Configuration:${NC}"
 [ -n "$DOMAIN_FILE" ] && log "  Domain file: $DOMAIN_FILE"
@@ -1246,116 +1339,31 @@ log "  CNAME comparison: Chain structure only (final IP ignored)"
 log "  IP Geolocation: $([ "$ENABLE_GEOIP" = "true" ] && echo "ENABLED (IP[COUNTRY] format, 不影响比较)" || echo "DISABLED")"
 log "========================================"
 
-total=${#DOMAIN_ORDER[@]}
-current=0
-diff_cnt=0
-err_cnt=0
-no_record_cnt=0
+# ---- Single-run mode ----
+if [ "$DAEMON_MODE" = "false" ]; then
+    run_one_round 1
 
-for ((didx=0; didx<${#DOMAIN_ORDER[@]}; didx++)); do
-    domain="${DOMAIN_ORDER[$didx]}"
-    type="${DOMAIN_CONFIG_ARR[$didx]}"
-    cat="${DOMAIN_CATEGORY_ARR[$didx]}"
+# ---- Daemon mode ----
+else
+    log "${GREEN}Daemon mode: running every ${DAEMON_INTERVAL}s${NC}"
+    [ "$DAEMON_MAX_ITER" -gt 0 ] && log "Max iterations: $DAEMON_MAX_ITER" || log "Max iterations: infinite"
 
-    log "\n${BLUE}[$((++current))/$total] Testing domain: $domain ($type) — ${#dns_names[@]} DNS servers${NC}"
-    results=()
-    has_err=0
-    has_no=0
-    for i in "${!dns_names[@]}"; do
-        name="${dns_names[$i]}"
-        ip="${dns_ips[$i]}"
-        [ $VERBOSE -eq 1 ] && log -n "  Querying $name... "
-        res=$(resolve_domain "$domain" "$ip" "$name" "$type")
-        [ $VERBOSE -eq 1 ] && log "done"
-        [[ "$res" == *"ERROR"* ]] && has_err=1
-        [[ "$res" == *"NO_RECORD"* ]] && has_no=1
-        results+=("$res")
-        if [ $i -lt $((${#dns_names[@]} - 1)) ]; then
-            if [ $VERBOSE -eq 1 ]; then
-                wait_with_countdown $QUERY_DELAY "Query delay"
-            else
-                echo -ne "${YELLOW}  Wait ${QUERY_DELAY}s...${NC}\r"
-                sleep $QUERY_DELAY
-                echo -e "${GREEN}  Done${NC}"
-            fi
+    round_num=0
+    while [ "$DAEMON_RUNNING" = "true" ]; do
+        ((round_num++))
+        [ "$DAEMON_MAX_ITER" -gt 0 ] && [ "$round_num" -ge "$DAEMON_MAX_ITER" ] && {
+            log "${GREEN}Daemon mode: max iterations ($DAEMON_MAX_ITER) reached, exiting${NC}"
+            DAEMON_RUNNING=false
+            break
+        }
+
+        run_one_round "$round_num"
+
+        if [ "$DAEMON_RUNNING" = "true" ]; then
+            log "${CYAN}Sleeping ${DAEMON_INTERVAL}s until next round...${NC}"
+            sleep "$DAEMON_INTERVAL"
         fi
     done
-    display_results "$domain" "$type" "$cat" "${results[@]}"
-    diff=$?
-    [ $diff -eq 1 ] && ((diff_cnt++))
-    [ $has_err -eq 1 ] && ((err_cnt++))
-    [ $has_no -eq 1 ] && ((no_record_cnt++))
-    write_to_csv "$domain" "$type" "${results[@]}"
-    emit_dns_prometheus "$domain" "$type" "$cat" "$diff" "${results[@]}"
-    if [ $current -lt $total ]; then
-        if [ $VERBOSE -eq 1 ]; then
-            wait_with_countdown $DOMAIN_DELAY "Domain delay"
-        else
-            echo -ne "${YELLOW}Wait ${DOMAIN_DELAY}s...${NC}\r"
-            sleep $DOMAIN_DELAY
-            echo -e "${GREEN}Done${NC}"
-        fi
-    fi
-done
 
-log "\n${GREEN}════════════════════════════════════════════════════════════${NC}"
-log "${GREEN}Test completed!${NC}"
-log "${PURPLE}════════════════════════════════════════════════════════════${NC}"
-
-log "\n${CYAN}Statistics:${NC}"
-log "  Total domains tested: $total"
-log "  ${BOLD_YELLOW}Domains with differences: $diff_cnt${NC}"
-log "  ${YELLOW}Domains with no records: $no_record_cnt${NC}"
-log "  ${BOLD_RED}Domains with errors: $err_cnt${NC}"
-log "  Consistent resolutions: $((total - diff_cnt))"
-
-if [ $diff_cnt -gt 0 ]; then
-    log "\n${BOLD_YELLOW}⚠ Differences were detected in $diff_cnt domain(s)${NC}"
-    log "${BOLD_YELLOW}  Check the difference log for details: $DIFF_LOG_FILE${NC}"
-    log "${BOLD_YELLOW}  Note: For CNAME records, differences are based on chain structure, not final IP${NC}"
+    log "${YELLOW}Daemon mode: total rounds completed: $round_num${NC}"
 fi
-if [ $no_record_cnt -gt 0 ]; then
-    log "\n${YELLOW}ℹ No records found for $no_record_cnt domain(s)${NC}"
-fi
-if [ $err_cnt -gt 0 ]; then
-    log "\n${BOLD_RED}✗ Errors occurred in $err_cnt domain(s)${NC}"
-    log "${BOLD_RED}  Check the error log for details: $ERROR_LOG_FILE${NC}"
-fi
-if [ "$ENABLE_GEOIP" = "true" ]; then
-    log "\n${CYAN}IP Geolocation Statistics:${NC}"
-    log "  Unique IPs resolved: ${#IP_COUNTRY_CACHE[@]}"
-    log "  GeoIP log: $GEOIP_LOG_FILE"
-fi
-
-log "\n${CYAN}Statistics by Category:${NC}"
-declare -a cat_names=()
-declare -a cat_counts=()
-for ((i=0; i<${#DOMAIN_ORDER[@]}; i++)); do
-    c="${DOMAIN_CATEGORY_ARR[$i]}"
-    found=0
-    for ((j=0; j<${#cat_names[@]}; j++)); do
-        [ "${cat_names[$j]}" = "$c" ] && ((cat_counts[$j]++)) && found=1 && break
-    done
-    [ $found -eq 0 ] && cat_names+=("$c") && cat_counts+=(1)
-done
-for ((j=0; j<${#cat_names[@]}; j++)); do
-    log "  ${PURPLE}${cat_names[$j]}:${NC} ${cat_counts[$j]} domains"
-done
-
-log "\n${GREEN}Output files:${NC}"
-log "  Detailed log: $LOG_FILE"
-log "  ${BOLD_YELLOW}Difference log: $DIFF_LOG_FILE${NC}"
-log "  ${BOLD_RED}Error log: $ERROR_LOG_FILE${NC}"
-[ "$ENABLE_GEOIP" = "true" ] && log "  ${CYAN}GeoIP log: $GEOIP_LOG_FILE${NC}"
-log "  Summary report: $SUMMARY_FILE"
-log "  A record report: $A_REPORT_FILE"
-log "  CNAME record report: $CNAME_REPORT_FILE"
-log "  MX record report: $MX_REPORT_FILE"
-log "  SOA record report: $SOA_REPORT_FILE"
-log "  TXT record report: $TXT_REPORT_FILE"
-
-# Write Prometheus summary metrics
-run_ts=$(date +%s)
-write_prometheus_final "$total" "$diff_cnt" "$err_cnt" "$no_record_cnt" "$run_ts"
-
-echo "====================================================="
