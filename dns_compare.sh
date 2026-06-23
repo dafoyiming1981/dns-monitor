@@ -1061,6 +1061,16 @@ compare_with_snapshot() {
 # In daemon mode, initialize output files for each round.
 # Truncates CSV/report files each round; logs are always appended.
 init_daemon_output_files() {
+    # Reassign log files to fixed names for daemon mode
+    LOG_FILE="dns_daemon.log"
+    DIFF_LOG_FILE="dns_differences.log"
+    ERROR_LOG_FILE="dns_errors.log"
+    SUMMARY_FILE="dns_summary.txt"
+
+    if [ "$ENABLE_GEOIP" = "true" ]; then
+        GEOIP_LOG_FILE="dns_geoip.log"
+    fi
+
     if [ "$ENABLE_GEOIP" = "true" ]; then
         echo "Domain,DNS Name,DNS IP,Result (IP[COUNTRY])" > "$A_REPORT_FILE"
         echo "Domain,DNS Name,DNS IP,Result (CNAME Chain with IP[COUNTRY])" > "$CNAME_REPORT_FILE"
@@ -1104,7 +1114,11 @@ run_one_round() {
         echo "========================================" >> "$LOG_FILE"
     fi
 
-    echo "DNS Difference Log - $(date)" > "$DIFF_LOG_FILE"
+    if [ "$DAEMON_MODE" = "true" ]; then
+        echo "DNS Difference Log - $(date)" >> "$DIFF_LOG_FILE"
+    else
+        echo "DNS Difference Log - $(date)" > "$DIFF_LOG_FILE"
+    fi
     echo "This file records all DNS resolution discrepancies" >> "$DIFF_LOG_FILE"
     echo "Note: For CNAME records, differences are based on chain structure" >> "$DIFF_LOG_FILE"
     echo "========================================" >> "$DIFF_LOG_FILE"
