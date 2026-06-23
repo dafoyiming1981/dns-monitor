@@ -136,7 +136,7 @@ for item in items:
     domain = item.get('domain', '').strip()
     rtype = item.get('type', 'ALL').strip().upper()
     category = item.get('category', 'default').strip()
-    if rtype not in ('A', 'CNAME', 'MX', 'SOA', 'ALL'):
+    if rtype not in ('A', 'CNAME', 'MX', 'SOA', 'TXT', 'ALL'):
         rtype = 'ALL'
     if domain:
         print(f'{domain}\t{rtype}\t{category}')
@@ -227,7 +227,7 @@ parse_domain_file() {
             current_category="${BASH_REMATCH[1]}"
             current_record_type="${BASH_REMATCH[2]}"
             case "$current_record_type" in
-                A|CNAME|MX|SOA|ALL) log "  Category: $current_category (Record Type: $current_record_type)" ;;
+                A|CNAME|MX|SOA|TXT|ALL) log "  Category: $current_category (Record Type: $current_record_type)" ;;
                 *) echo -e "${YELLOW}Warning: Invalid record type '$current_record_type', using ALL${NC}"; current_record_type="ALL" ;;
             esac
             continue
@@ -265,7 +265,7 @@ CMD_TYPE=""
 add_single_domain() {
     local domain="$1"
     local record_type="$2"
-    case "$record_type" in A|CNAME|MX|SOA|ALL) ;; *) echo -e "${RED}Error: Invalid record type '$record_type'${NC}" >&2; return 1 ;; esac
+    case "$record_type" in A|CNAME|MX|SOA|TXT|ALL) ;; *) echo -e "${RED}Error: Invalid record type '$record_type'${NC}" >&2; return 1 ;; esac
     local idx=${#DOMAIN_ORDER[@]}
     DOMAIN_ORDER[$idx]="$domain"
     DOMAIN_CONFIG_ARR[$idx]="$record_type"
@@ -282,6 +282,7 @@ get_record_type_name() {
         CNAME) echo "CNAME Record";;
         MX) echo "MX Record";;
         SOA) echo "SOA Record";;
+        TXT) echo "TXT Record";;
         ALL) echo "All Record Types";;
         *) echo "Unknown";;
     esac
@@ -472,6 +473,59 @@ resolve_soa_record() {
     echo "$status|$qtime|$raw|$display|$err"
 }
 
+# TXT record categorizer
+# Classifies TXT strings by known prefix patterns
+# Usage: categorize_txt "txt_string"
+# Returns: category label (SPF, DMARC, DKIM, OTHER)
+categorize_txt() {
+    local txt="$1"
+    # Strip leading/trailing whitespace and quotes
+    txt=$(echo "$txt" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
+    case "$txt" in
+        v=spf1*) echo "SPF" ;;
+        v=DMARC1*) echo "DMARC" ;;
+        v=DKIM1*|k=rsa*|k=ed25519*) echo "DKIM" ;;
+        *) echo "OTHER" ;;
+    esac
+}
+
+resolve_txt_record() {
+    local domain="$1" dns_ip="$2" dns_name="$3"
+    local result=$(dig @"$dns_ip" "$domain" TXT +time="$QUERY_TIMEOUT" +tries="$QUERY_RETRIES" +stats 2>&1)
+    local exit_code=$?
+    local qtime=$(echo "$result" | grep "Query time:" | awk '{print $4}')
+    # Extract all TXT strings from ANSWER SECTION
+    local txt_lines=$(echo "$result" | grep -E '^[a-zA-Z0-9].*[[:space:]]TXT[[:space:]]' | sed 's/^[^"]*"\(.*\)"/\1/' | sed 's/"[[:space:]]*"/ /g')
+    local status="SUCCESS"
+    local err=""
+    if [ $exit_code -ne 0 ]; then
+        status="ERROR"; err="DNS query failed"
+        echo "$result" | grep -q "connection timed out" && err="Connection timeout"
+        echo "$result" | grep -q "no servers could be reached" && err="DNS server unreachable"
+    elif [ -z "$qtime" ]; then
+        status="ERROR"; err="No response"
+    elif [ -z "$txt_lines" ]; then
+        status="NO_RECORD"; err="No TXT record"
+    fi
+    [ -z "$qtime" ] && qtime="N/A"
+    [ -z "$txt_lines" ] && txt_lines="N/A"
+    # Format display: number each TXT entry with its category
+    local display=""
+    local idx=0
+    while IFS= read -r txt; do
+        [ -z "$txt" ] && continue
+        local cat=$(categorize_txt "$txt")
+        if [ -n "$display" ]; then
+            display="${display}; TXT[${idx}][${cat}]:${txt}"
+        else
+            display="TXT[${idx}][${cat}]:${txt}"
+        fi
+        ((idx++))
+    done <<< "$txt_lines"
+    [ -z "$display" ] && display="N/A"
+    echo "$status|$qtime|$txt_lines|$display|$err"
+}
+
 resolve_domain() {
     local domain="$1" dns_ip="$2" dns_name="$3" type="$4"
     case "$type" in
@@ -510,6 +564,15 @@ resolve_domain() {
             local disp=$(echo "$r" | cut -d'|' -f4)
             local e=$(echo "$r" | cut -d'|' -f5)
             echo "$dns_name|$dns_ip|SOA|$s|$t|$raw|$disp|$e"
+            ;;
+        "TXT")
+            local r=$(resolve_txt_record "$domain" "$dns_ip" "$dns_name")
+            local s=$(echo "$r" | cut -d'|' -f1)
+            local t=$(echo "$r" | cut -d'|' -f2)
+            local raw=$(echo "$r" | cut -d'|' -f3)
+            local disp=$(echo "$r" | cut -d'|' -f4)
+            local e=$(echo "$r" | cut -d'|' -f5)
+            echo "$dns_name|$dns_ip|TXT|$s|$t|$raw|$disp|$e"
             ;;
         "ALL")
             local a=$(resolve_a_record "$domain" "$dns_ip" "$dns_name")
@@ -1310,7 +1373,8 @@ for ((didx=0; didx<${#DOMAIN_ORDER[@]}; didx++)); do
     domain="${DOMAIN_ORDER[$didx]}"
     type="${DOMAIN_CONFIG_ARR[$didx]}"
     cat="${DOMAIN_CATEGORY_ARR[$didx]}"
-    log "\n${BLUE}[$((++current))/$total] Testing domain: $domain ($type)${NC}"
+
+    log "\n${BLUE}[$((++current))/$total] Testing domain: $domain ($type) — ${#dns_names[@]} DNS servers${NC}"
     results=()
     has_err=0
     has_no=0
