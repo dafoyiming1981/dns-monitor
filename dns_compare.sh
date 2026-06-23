@@ -930,12 +930,30 @@ Record Types:
   SOA    - Start of Authority records (shows full AUTHORITY SECTION line)
   TXT    - Text records (auto-categorized: SPF/DMARC/DKIM/OTHER)
 
+Daemon Mode Options:
+  --daemon               Run in continuous monitoring mode (does not exit)
+  --interval SECONDS     Time between detection rounds (default: 60)
+  --max-iterations N     Maximum rounds before exit (0 = infinite, default: 0)
+  --change-log FILE      Change log output path (default: dns_changes.log)
+
 Examples:
   $0 -d google.com -t A
   $0 -d example.com -t SOA
   $0 --no-geoip -d google.com -t A
 EOF
 }
+
+# ====================================================
+# Daemon mode helpers
+# ====================================================
+
+daemon_cleanup() {
+    log "${YELLOW}Daemon mode: shutting down gracefully...${NC}"
+    DAEMON_RUNNING=false
+}
+
+# Register signal handlers for graceful shutdown
+trap daemon_cleanup SIGTERM SIGINT
 
 # ====================================================
 # Main
@@ -948,6 +966,14 @@ CMD_DOMAINS=()
 CMD_TYPES=()
 CURRENT_TYPE=""
 ENABLE_GEOIP=true
+
+# Daemon mode variables
+DAEMON_MODE=false
+DAEMON_INTERVAL=60
+DAEMON_MAX_ITER=0
+DAEMON_RUNNING=true
+CHANGE_LOG_FILE=""
+SNAPSHOT_FILE="dns_latest_snapshot.json"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -970,6 +996,10 @@ while [[ $# -gt 0 ]]; do
         --delay) QUERY_DELAY="$2"; shift 2 ;;
         --domain-delay) DOMAIN_DELAY="$2"; shift 2 ;;
         --prom-dir) PROMETHEUS_TEXTFILE_DIR="$2"; shift 2 ;;
+        --daemon) DAEMON_MODE=true; shift ;;
+        --interval) DAEMON_INTERVAL="$2"; shift 2 ;;
+        --max-iterations) DAEMON_MAX_ITER="$2"; shift 2 ;;
+        --change-log) CHANGE_LOG_FILE="$2"; shift 2 ;;
         -*)
             echo -e "${RED}Error: Unknown option $1${NC}"
             show_help
@@ -981,6 +1011,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ "$DAEMON_MODE" = "true" ] && [ -z "$CHANGE_LOG_FILE" ]; then
+    CHANGE_LOG_FILE="dns_changes.log"
+fi
 
 [ -z "$DOMAIN_FILE" ] && [ ${#CMD_DOMAINS[@]} -eq 0 ] && DOMAIN_FILE="$DEFAULT_DOMAIN_FILE"
 
