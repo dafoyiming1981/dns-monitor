@@ -1012,6 +1012,52 @@ load_snapshot_value() {
     return 1
 }
 
+# Compare current round results against previous snapshot; writes changes to change log
+# Usage: compare_with_snapshot domain record_type dns_server current_status current_raw
+compare_with_snapshot() {
+    local domain="$1" record_type="$2" dns_server="$3" status="$4" raw="$5"
+    local key="${domain}@${record_type}@${dns_server}"
+
+    local prev_value
+    prev_value=$(load_snapshot_value "$key")
+    local load_rc=$?
+
+    # If no previous snapshot or key not found, skip (first round or new domain)
+    [ $load_rc -ne 0 ] && [ -z "$prev_value" ] && return 0
+
+    # Determine current display value
+    local curr_value="$raw"
+    [ "$status" = "ERROR" ] && curr_value="ERROR"
+    [ "$status" = "NO_RECORD" ] && curr_value="NO_RECORD"
+
+    # No change
+    [ "$prev_value" = "$curr_value" ] && return 0
+
+    # Classify change
+    local change_type=""
+    local change_desc=""
+
+    if [ "$prev_value" = "NO_RECORD" ] || [ -z "$prev_value" ]; then
+        [ "$status" != "NO_RECORD" ] && [ "$status" != "ERROR" ] && change_type="NEW"
+    elif [ "$prev_value" != "ERROR" ] && [ "$curr_value" = "ERROR" ]; then
+        change_type="ERROR"
+        change_desc="${prev_value} -> query failed"
+    elif [ "$curr_value" = "NO_RECORD" ]; then
+        change_type="GONE"
+        change_desc="${prev_value} -> NO_RECORD"
+    else
+        change_type="CHANGE"
+        change_desc="${prev_value} -> ${curr_value}"
+    fi
+
+    [ -z "$change_type" ] && return 0
+
+    local ts=$(date '+%Y-%m-%d %H:%M:%S')
+    local msg="[${ts}] ${change_type} ${domain} (${record_type}) via ${dns_server}: ${change_desc}"
+    echo "$msg" >> "$CHANGE_LOG_FILE"
+    log "${YELLOW}  ${msg}${NC}"
+}
+
 # ====================================================
 # Main
 # ====================================================
