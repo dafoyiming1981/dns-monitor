@@ -1,10 +1,9 @@
 #!/bin/bash
 
 # ====================================================
-# Multi-DNS comparison test script v7.18
-# - SOA record extracted from AUTHORITY SECTION
-# - Fixed GeoIP syntax errors (if-else)
-# - Full ANSWER SECTION line for SOA
+# Multi-DNS comparison test script v8.0
+# - Removed ALL record type
+# - Added TXT record support with auto-categorization
 # Usage: ./dns_compare.sh [options] [domain list file]
 # ====================================================
 
@@ -135,10 +134,10 @@ if not items:
 
 for item in items:
     domain = item.get('domain', '').strip()
-    rtype = item.get('type', 'ALL').strip().upper()
+    rtype = item.get('type', 'A').strip().upper()
     category = item.get('category', 'default').strip()
-    if rtype not in ('A', 'CNAME', 'MX', 'SOA', 'TXT', 'ALL'):
-        rtype = 'ALL'
+    if rtype not in ('A', 'CNAME', 'MX', 'SOA', 'TXT'):
+        rtype = 'A'
     if domain:
         print(f'{domain}\t{rtype}\t{category}')
 " 2>&1) || { log "${RED}Error parsing JSON/YAML: $parsed${NC}"; return 1; }
@@ -218,7 +217,7 @@ parse_domain_file() {
     esac
     log "${BLUE}Parsing domain list file: $file${NC}"
     local current_category="default"
-    local current_record_type="ALL"
+    local current_record_type="A"
     local domain_count=0
     local idx=0
     while IFS= read -r line || [ -n "$line" ]; do
@@ -228,14 +227,14 @@ parse_domain_file() {
             current_category="${BASH_REMATCH[1]}"
             current_record_type="${BASH_REMATCH[2]}"
             case "$current_record_type" in
-                A|CNAME|MX|SOA|TXT|ALL) log "  Category: $current_category (Record Type: $current_record_type)" ;;
-                *) echo -e "${YELLOW}Warning: Invalid record type '$current_record_type', using ALL${NC}"; current_record_type="ALL" ;;
+                A|CNAME|MX|SOA|TXT) log "  Category: $current_category (Record Type: $current_record_type)" ;;
+                *) echo -e "${YELLOW}Warning: Invalid record type '$current_record_type', using A${NC}"; current_record_type="A" ;;
             esac
             continue
         fi
         if [[ "$line" =~ ^\[([^]]+)\]$ ]]; then
             current_category="${BASH_REMATCH[1]}"
-            [ -z "$current_record_type" ] && current_record_type="ALL"
+            [ -z "$current_record_type" ] && current_record_type="A"
             log "  Category: $current_category (Record Type: $current_record_type)"
             continue
         fi
@@ -266,7 +265,7 @@ CMD_TYPE=""
 add_single_domain() {
     local domain="$1"
     local record_type="$2"
-    case "$record_type" in A|CNAME|MX|SOA|TXT|ALL) ;; *) echo -e "${RED}Error: Invalid record type '$record_type'${NC}" >&2; return 1 ;; esac
+    case "$record_type" in A|CNAME|MX|SOA|TXT) ;; *) echo -e "${RED}Error: Invalid record type '$record_type'${NC}" >&2; return 1 ;; esac
     local idx=${#DOMAIN_ORDER[@]}
     DOMAIN_ORDER[$idx]="$domain"
     DOMAIN_CONFIG_ARR[$idx]="$record_type"
@@ -906,7 +905,7 @@ wait_with_countdown() {
 
 show_help() {
     cat << EOF
-Multi-DNS Comparison Test v7.18
+Multi-DNS Comparison Test v8.0
 
 Usage: $0 [options] [domain list file]
 
@@ -914,7 +913,7 @@ Options:
   -h, --help               Show this help message
   -f, --file FILE          Specify domain list file (default: domains.txt)
   -d, --domain DOMAIN      Specify a single domain to test
-  -t, --type TYPE          Set record type for subsequent domains (A, CNAME, MX, SOA, ALL)
+  -t, --type TYPE          Set record type for subsequent domains (A, CNAME, MX, SOA, TXT)
   -o, --output DIR         Specify output directory
   -v, --verbose            Show detailed output
   --geoip                  Enable IP geolocation (default: enabled)
@@ -929,7 +928,7 @@ Record Types:
   CNAME  - Canonical Name records (shows full chain)
   MX     - Mail Exchange records
   SOA    - Start of Authority records (shows full AUTHORITY SECTION line)
-  ALL    - Query all record types (A, CNAME, MX, SOA)
+  TXT    - Text records (auto-categorized: SPF/DMARC/DKIM/OTHER)
 
 Examples:
   $0 -d google.com -t A
@@ -947,7 +946,7 @@ VERBOSE=0
 OUTPUT_DIR="."
 CMD_DOMAINS=()
 CMD_TYPES=()
-CURRENT_TYPE="ALL"
+CURRENT_TYPE=""
 ENABLE_GEOIP=true
 
 while [[ $# -gt 0 ]]; do
@@ -985,6 +984,11 @@ done
 
 [ -z "$DOMAIN_FILE" ] && [ ${#CMD_DOMAINS[@]} -eq 0 ] && DOMAIN_FILE="$DEFAULT_DOMAIN_FILE"
 
+# Validate that all CMD_TYPES are set (no empty types)
+for ct in "${CMD_TYPES[@]}"; do
+    [ -z "$ct" ] && { echo -e "${RED}Error: must specify record type with -t (A/CNAME/MX/SOA/TXT)${NC}"; show_help; exit 1; }
+done
+
 check_dependencies
 
 # IP_COUNTRY_CACHE uses associative array on bash 4+, regular variable on older versions
@@ -1011,8 +1015,8 @@ init_prometheus
 
 clear
 echo "====================================================="
-echo "          Multi-DNS Comparison Test v7.18"
-echo "          (SOA from AUTHORITY SECTION, GeoIP display)"
+echo "          Multi-DNS Comparison Test v8.0"
+echo "          (SOA from AUTHORITY SECTION, TXT auto-categorization, GeoIP display)"
 if [ ${#CMD_DOMAINS[@]} -gt 0 ]; then
     echo "          (Command-line domain mode)"
 fi
@@ -1045,7 +1049,7 @@ echo "Delay between domains: ${DOMAIN_DELAY}s"
 echo "====================================================="
 
 # Initialize log files
-echo "Multi-DNS Comparison Test v7.18 - $(date)" > "$LOG_FILE"
+echo "Multi-DNS Comparison Test v8.0 - $(date)" > "$LOG_FILE"
 [ -n "$DOMAIN_FILE" ] && echo "Domain file: $DOMAIN_FILE" >> "$LOG_FILE"
 [ ${#CMD_DOMAINS[@]} -gt 0 ] && echo "Command-line domains:" >> "$LOG_FILE"
 for i in "${!CMD_DOMAINS[@]}"; do
