@@ -25,7 +25,7 @@ groups:
           summary: "DNS差异检测 - {{ $labels.domain }} ({{ $labels.server }})"
           description: >
             DNS服务器 {{ $labels.server }} 对 {{ $labels.domain }}
-            的 {{ $labels.record_type }} 记录解析结果与基线不一致。
+            的 {{ $labels.record_type }} 记录（含 TXT 自动分类）解析结果与基线不一致。
             请检查 DNS 配置和 GSLB 调度策略。
 
       # -------------------------------------------------------
