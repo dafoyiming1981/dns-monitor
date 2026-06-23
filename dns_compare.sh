@@ -283,7 +283,6 @@ get_record_type_name() {
         MX) echo "MX Record";;
         SOA) echo "SOA Record";;
         TXT) echo "TXT Record";;
-        ALL) echo "All Record Types";;
         *) echo "Unknown";;
     esac
 }
@@ -574,33 +573,6 @@ resolve_domain() {
             local e=$(echo "$r" | cut -d'|' -f5)
             echo "$dns_name|$dns_ip|TXT|$s|$t|$raw|$disp|$e"
             ;;
-        "ALL")
-            local a=$(resolve_a_record "$domain" "$dns_ip" "$dns_name")
-            local a_s=$(echo "$a" | cut -d'|' -f1)
-            local a_t=$(echo "$a" | cut -d'|' -f2)
-            local a_raw=$(echo "$a" | cut -d'|' -f3)
-            local a_disp=$(echo "$a" | cut -d'|' -f4)
-            local a_e=$(echo "$a" | cut -d'|' -f5)
-            local c=$(resolve_cname_record "$domain" "$dns_ip" "$dns_name")
-            local c_s=$(echo "$c" | cut -d'|' -f1)
-            local c_t=$(echo "$c" | cut -d'|' -f2)
-            local c_raw=$(echo "$c" | cut -d'|' -f3)
-            local c_disp=$(echo "$c" | cut -d'|' -f4)
-            local c_e=$(echo "$c" | cut -d'|' -f5)
-            local m=$(resolve_mx_record "$domain" "$dns_ip" "$dns_name")
-            local m_s=$(echo "$m" | cut -d'|' -f1)
-            local m_t=$(echo "$m" | cut -d'|' -f2)
-            local m_raw=$(echo "$m" | cut -d'|' -f3)
-            local m_disp=$(echo "$m" | cut -d'|' -f4)
-            local m_e=$(echo "$m" | cut -d'|' -f5)
-            local s=$(resolve_soa_record "$domain" "$dns_ip" "$dns_name")
-            local s_s=$(echo "$s" | cut -d'|' -f1)
-            local s_t=$(echo "$s" | cut -d'|' -f2)
-            local s_raw=$(echo "$s" | cut -d'|' -f3)
-            local s_disp=$(echo "$s" | cut -d'|' -f4)
-            local s_e=$(echo "$s" | cut -d'|' -f5)
-            echo "$dns_name|$dns_ip|ALL|A:$a_s:$a_t:$a_raw:$a_disp:$a_e|CNAME:$c_s:$c_t:$c_raw:$c_disp:$c_e|MX:$m_s:$m_t:$m_raw:$m_disp:$m_e|SOA:$s_s:$s_t:$s_raw:$s_disp:$s_e"
-            ;;
     esac
 }
 
@@ -612,46 +584,18 @@ display_results() {
     local domain="$1" record_type="$2" category="$3"
     shift 3
     local results=("$@")
-    local baseline_a=""
-    local baseline_cname_chain=""
-    local baseline_mx=""
-    local baseline_soa=""
+    local baseline=""
     local has_differences=0
 
-    # Collect baselines
+    # Collect baseline from first DNS server
     for r in "${results[@]}"; do
         local rt=$(echo "$r" | cut -d'|' -f3)
-        [ "$record_type" != "ALL" ] && [ "$rt" != "$record_type" ] && continue
-        if [ "$rt" = "ALL" ]; then
-            local a_data=$(echo "$r" | cut -d'|' -f4 | sed 's/A://')
-            local c_data=$(echo "$r" | cut -d'|' -f5 | sed 's/CNAME://')
-            local m_data=$(echo "$r" | cut -d'|' -f6 | sed 's/MX://')
-            local s_data=$(echo "$r" | cut -d'|' -f7 | sed 's/SOA://')
-            local a_status=$(echo "$a_data" | cut -d':' -f1)
-            local a_raw=$(echo "$a_data" | cut -d':' -f3)
-            local c_status=$(echo "$c_data" | cut -d':' -f1)
-            local c_raw=$(echo "$c_data" | cut -d':' -f3)
-            local m_status=$(echo "$m_data" | cut -d':' -f1)
-            local m_raw=$(echo "$m_data" | cut -d':' -f3)
-            local s_status=$(echo "$s_data" | cut -d':' -f1)
-            local s_raw=$(echo "$s_data" | cut -d':' -f3)
-            [ -z "$baseline_a" ] && [ "$a_status" = "SUCCESS" ] && baseline_a="$a_raw"
-            [ -z "$baseline_cname_chain" ] && [ "$c_status" = "SUCCESS" ] && baseline_cname_chain=$(extract_chain_only "$c_raw")
-            [ -z "$baseline_mx" ] && [ "$m_status" = "SUCCESS" ] && baseline_mx="$m_raw"
-            [ -z "$baseline_soa" ] && [ "$s_status" = "SUCCESS" ] && baseline_soa="$s_raw"
-        elif [ "$rt" = "CNAME" ]; then
-            local status=$(echo "$r" | cut -d'|' -f4)
-            local raw=$(echo "$r" | cut -d'|' -f6)
-            [ -z "$baseline_cname_chain" ] && [ "$status" = "SUCCESS" ] && baseline_cname_chain=$(extract_chain_only "$raw")
-        elif [ "$rt" = "SOA" ]; then
-            local status=$(echo "$r" | cut -d'|' -f4)
-            local raw=$(echo "$r" | cut -d'|' -f6)
-            [ -z "$baseline_soa" ] && [ "$status" = "SUCCESS" ] && baseline_soa="$raw"
-        else
-            local status=$(echo "$r" | cut -d'|' -f4)
-            local raw=$(echo "$r" | cut -d'|' -f6)
-            [ -z "$baseline_a" ] && [ "$status" = "SUCCESS" ] && baseline_a="$raw"
-        fi
+        [ "$rt" != "$record_type" ] && continue
+        local status=$(echo "$r" | cut -d'|' -f4)
+        local raw=$(echo "$r" | cut -d'|' -f6)
+        [ -z "$baseline" ] && [ "$status" = "SUCCESS" ] && baseline="$raw"
+        [ "$rt" = "CNAME" ] && [ "$status" = "SUCCESS" ] && baseline=$(extract_chain_only "$raw")
+        break
     done
 
     log "\n${PURPLE}────────────────────────────────────────────────────────────${NC}"
@@ -662,165 +606,47 @@ display_results() {
     fi
     log "${PURPLE}────────────────────────────────────────────────────────────${NC}"
 
+    local count=${#results[@]}
+    local idx=0
     for r in "${results[@]}"; do
         local dns_name=$(echo "$r" | cut -d'|' -f1)
         local dns_ip=$(echo "$r" | cut -d'|' -f2)
         local rt=$(echo "$r" | cut -d'|' -f3)
-        [ "$record_type" != "ALL" ] && [ "$rt" != "$record_type" ] && continue
+        local status=$(echo "$r" | cut -d'|' -f4)
+        local time_val=$(echo "$r" | cut -d'|' -f5)
+        local raw=$(echo "$r" | cut -d'|' -f6)
+        local display=$(echo "$r" | cut -d'|' -f7)
+        local err=$(echo "$r" | cut -d'|' -f8)
 
-        if [ "$rt" = "ALL" ]; then
-            local a_data=$(echo "$r" | cut -d'|' -f4 | sed 's/A://')
-            local c_data=$(echo "$r" | cut -d'|' -f5 | sed 's/CNAME://')
-            local m_data=$(echo "$r" | cut -d'|' -f6 | sed 's/MX://')
-            local s_data=$(echo "$r" | cut -d'|' -f7 | sed 's/SOA://')
-
-            local a_s=$(echo "$a_data" | cut -d':' -f1)
-            local a_t=$(echo "$a_data" | cut -d':' -f2)
-            local a_raw=$(echo "$a_data" | cut -d':' -f3)
-            local a_disp=$(echo "$a_data" | cut -d':' -f4)
-            local a_e=$(echo "$a_data" | cut -d':' -f5)
-
-            local c_s=$(echo "$c_data" | cut -d':' -f1)
-            local c_t=$(echo "$c_data" | cut -d':' -f2)
-            local c_raw=$(echo "$c_data" | cut -d':' -f3)
-            local c_disp=$(echo "$c_data" | cut -d':' -f4)
-            local c_e=$(echo "$c_data" | cut -d':' -f5)
-
-            local m_s=$(echo "$m_data" | cut -d':' -f1)
-            local m_t=$(echo "$m_data" | cut -d':' -f2)
-            local m_raw=$(echo "$m_data" | cut -d':' -f3)
-            local m_disp=$(echo "$m_data" | cut -d':' -f4)
-            local m_e=$(echo "$m_data" | cut -d':' -f5)
-
-            local s_s=$(echo "$s_data" | cut -d':' -f1)
-            local s_t=$(echo "$s_data" | cut -d':' -f2)
-            local s_raw=$(echo "$s_data" | cut -d':' -f3)
-            local s_disp=$(echo "$s_data" | cut -d':' -f4)
-            local s_e=$(echo "$s_data" | cut -d':' -f5)
-
-            printf "  %-12s (%-15s):\n" "$dns_name" "$dns_ip"
-
-            # A record
-            if [ "$a_s" = "SUCCESS" ]; then
-                if [ -n "$baseline_a" ] && [ "$a_raw" != "$baseline_a" ]; then
-                    printf "    ├─ ${BOLD_YELLOW}A     : %-10s | %s${NC}\n" "$a_t" "$a_disp"
-                    has_differences=1
-                else
-                    printf "    ├─ ${GREEN}A     : %-10s | %s${NC}\n" "$a_t" "$a_disp"
-                fi
-            elif [ "$a_s" = "NO_RECORD" ]; then
-                printf "    ├─ ${YELLOW}A     : %-10s | %s [No A record found]${NC}\n" "$a_t" "N/A"
-            else
-                printf "    ├─ ${BOLD_RED}A     : %-10s | %s [ERROR: %s]${NC}\n" "$a_t" "N/A" "$a_e"
-                log_error "$a_e" "$domain" "$dns_name" "$dns_ip" "A"
-            fi
-
-            # CNAME record
-            if [ "$c_s" = "SUCCESS" ]; then
-                local cur_chain=$(extract_chain_only "$c_raw")
-                if [ -n "$baseline_cname_chain" ] && [ "$cur_chain" != "$baseline_cname_chain" ]; then
-                    printf "    ├─ ${BOLD_YELLOW}CNAME : %-10s | %s${NC}\n" "$c_t" "$c_disp"
-                    has_differences=1
-                else
-                    printf "    ├─ ${GREEN}CNAME : %-10s | %s${NC}\n" "$c_t" "$c_disp"
-                fi
-            elif [ "$c_s" = "NO_RECORD" ]; then
-                printf "    ├─ ${YELLOW}CNAME : %-10s | %s [No CNAME record found]${NC}\n" "$c_t" "N/A"
-            else
-                printf "    ├─ ${BOLD_RED}CNAME : %-10s | %s [ERROR: %s]${NC}\n" "$c_t" "N/A" "$c_e"
-                log_error "$c_e" "$domain" "$dns_name" "$dns_ip" "CNAME"
-            fi
-
-            # MX record
-            if [ "$m_s" = "SUCCESS" ]; then
-                if [ -n "$baseline_mx" ] && [ "$m_raw" != "$baseline_mx" ]; then
-                    printf "    ├─ ${BOLD_YELLOW}MX    : %-10s | %s${NC}\n" "$m_t" "$m_disp"
-                    has_differences=1
-                else
-                    printf "    ├─ ${GREEN}MX    : %-10s | %s${NC}\n" "$m_t" "$m_disp"
-                fi
-            elif [ "$m_s" = "NO_RECORD" ]; then
-                printf "    ├─ ${YELLOW}MX    : %-10s | %s [No MX record found]${NC}\n" "$m_t" "N/A"
-            else
-                printf "    ├─ ${BOLD_RED}MX    : %-10s | %s [ERROR: %s]${NC}\n" "$m_t" "N/A" "$m_e"
-                log_error "$m_e" "$domain" "$dns_name" "$dns_ip" "MX"
-            fi
-
-            # SOA record
-            if [ "$s_s" = "SUCCESS" ]; then
-                if [ -n "$baseline_soa" ] && [ "$s_raw" != "$baseline_soa" ]; then
-                    printf "    └─ ${BOLD_YELLOW}SOA   : %-10s | %s${NC}\n" "$s_t" "$s_disp"
-                    has_differences=1
-                else
-                    printf "    └─ ${GREEN}SOA   : %-10s | %s${NC}\n" "$s_t" "$s_disp"
-                fi
-            elif [ "$s_s" = "NO_RECORD" ]; then
-                printf "    └─ ${YELLOW}SOA   : %-10s | %s [No SOA record found]${NC}\n" "$s_t" "N/A"
-            else
-                printf "    └─ ${BOLD_RED}SOA   : %-10s | %s [ERROR: %s]${NC}\n" "$s_t" "N/A" "$s_e"
-                log_error "$s_e" "$domain" "$dns_name" "$dns_ip" "SOA"
-            fi
-        elif [ "$rt" = "SOA" ]; then
-            # Single SOA record
-            local status=$(echo "$r" | cut -d'|' -f4)
-            local time=$(echo "$r" | cut -d'|' -f5)
-            local raw=$(echo "$r" | cut -d'|' -f6)
-            local display=$(echo "$r" | cut -d'|' -f7)
-            local err=$(echo "$r" | cut -d'|' -f8)
-
-            local is_diff=0
-            if [ "$status" = "SUCCESS" ] && [ -n "$baseline_soa" ] && [ "$raw" != "$baseline_soa" ]; then
-                is_diff=1
-            fi
-
-            if [ "$status" = "SUCCESS" ]; then
-                if [ $is_diff -eq 1 ]; then
-                    printf "  ${BOLD_YELLOW}%-12s (%-15s) : %-10s | %s${NC}\n" "$dns_name" "$dns_ip" "$time" "$display"
-                    has_differences=1
-                else
-                    printf "  ${GREEN}%-12s (%-15s) : %-10s | %s${NC}\n" "$dns_name" "$dns_ip" "$time" "$display"
-                fi
-            elif [ "$status" = "NO_RECORD" ]; then
-                printf "  ${YELLOW}%-12s (%-15s) : %-10s | %s [No SOA record found]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A"
-            else
-                printf "  ${BOLD_RED}%-12s (%-15s) : %-10s | %s [ERROR: %s]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A" "$err"
-                log_error "$err" "$domain" "$dns_name" "$dns_ip" "SOA"
-            fi
-        else
-            # Single record type (A, CNAME, MX)
-            local status=$(echo "$r" | cut -d'|' -f4)
-            local time=$(echo "$r" | cut -d'|' -f5)
-            local raw=$(echo "$r" | cut -d'|' -f6)
-            local display=$(echo "$r" | cut -d'|' -f7)
-            local err=$(echo "$r" | cut -d'|' -f8)
-
-            local is_diff=0
-            if [ "$status" = "SUCCESS" ]; then
-                if [ "$rt" = "A" ] && [ -n "$baseline_a" ] && [ "$raw" != "$baseline_a" ]; then
-                    is_diff=1
-                elif [ "$rt" = "CNAME" ] && [ -n "$baseline_cname_chain" ]; then
-                    local cur_chain=$(extract_chain_only "$raw")
-                    [ "$cur_chain" != "$baseline_cname_chain" ] && is_diff=1
-                elif [ "$rt" = "MX" ] && [ -n "$baseline_mx" ] && [ "$raw" != "$baseline_mx" ]; then
-                    is_diff=1
-                fi
-            fi
-
-            if [ "$status" = "SUCCESS" ]; then
-                if [ $is_diff -eq 1 ]; then
-                    printf "  ${BOLD_YELLOW}%-12s (%-15s) : %-10s | %s${NC}\n" "$dns_name" "$dns_ip" "$time" "$display"
-                    has_differences=1
-                else
-                    printf "  ${GREEN}%-12s (%-15s) : %-10s | %s${NC}\n" "$dns_name" "$dns_ip" "$time" "$display"
-                fi
-            elif [ "$status" = "NO_RECORD" ]; then
-                printf "  ${YELLOW}%-12s (%-15s) : %-10s | %s [No record found]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A"
-            else
-                printf "  ${BOLD_RED}%-12s (%-15s) : %-10s | %s [ERROR: %s]${NC}\n" "$dns_name" "$dns_ip" "$time" "N/A" "$err"
-                log_error "$err" "$domain" "$dns_name" "$dns_ip" "$rt"
-            fi
+        local is_diff=0
+        if [ "$status" = "SUCCESS" ] && [ -n "$baseline" ]; then
+            local compare_val="$raw"
+            [ "$rt" = "CNAME" ] && compare_val=$(extract_chain_only "$raw")
+            [ "$compare_val" != "$baseline" ] && is_diff=1
         fi
+
+        local connector="├─"
+        [ $((idx + 1)) -eq $count ] && connector="└─"
+
+        if [ "$status" = "SUCCESS" ]; then
+            if [ $is_diff -eq 1 ]; then
+                printf "  ${BOLD_YELLOW}%-12s (%-15s) : %-10s | %s${NC}\n" "$dns_name" "$dns_ip" "$time_val" "$display"
+                has_differences=1
+            else
+                printf "  ${GREEN}%-12s (%-15s) : %-10s | %s${NC}\n" "$dns_name" "$dns_ip" "$time_val" "$display"
+            fi
+        elif [ "$status" = "NO_RECORD" ]; then
+            printf "  ${YELLOW}%-12s (%-15s) : %-10s | %s [No record found]${NC}\n" "$dns_name" "$dns_ip" "$time_val" "N/A"
+        else
+            printf "  ${BOLD_RED}%-12s (%-15s) : %-10s | %s [ERROR: %s]${NC}\n" "$dns_name" "$dns_ip" "$time_val" "N/A" "$err"
+            log_error "$err" "$domain" "$dns_name" "$dns_ip" "$rt"
+        fi
+        ((idx++))
     done
+
+    if [ "$record_type" = "TXT" ] && [ -z "$baseline" ]; then
+        log "\n  ${YELLOW}No TXT records found for this domain${NC}"
+    fi
 
     if [ $has_differences -eq 1 ]; then
         local ts=$(date '+%Y-%m-%d %H:%M:%S')
