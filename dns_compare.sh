@@ -42,6 +42,7 @@ A_REPORT_FILE="dns_a_report_$(date +%Y%m%d_%H%M%S).csv"
 CNAME_REPORT_FILE="dns_cname_report_$(date +%Y%m%d_%H%M%S).csv"
 MX_REPORT_FILE="dns_mx_report_$(date +%Y%m%d_%H%M%S).csv"
 SOA_REPORT_FILE="dns_soa_report_$(date +%Y%m%d_%H%M%S).csv"
+TXT_REPORT_FILE="dns_txt_report_$(date +%Y%m%d_%H%M%S).csv"
 
 # Colors
 RED='\033[0;31m'
@@ -672,29 +673,15 @@ write_to_csv() {
         local dns_name=$(echo "$r" | cut -d'|' -f1)
         local dns_ip=$(echo "$r" | cut -d'|' -f2)
         local rt=$(echo "$r" | cut -d'|' -f3)
-        [ "$record_type" != "ALL" ] && [ "$rt" != "$record_type" ] && continue
-        if [ "$rt" = "ALL" ]; then
-            local a_data=$(echo "$r" | cut -d'|' -f4 | sed 's/A://')
-            local c_data=$(echo "$r" | cut -d'|' -f5 | sed 's/CNAME://')
-            local m_data=$(echo "$r" | cut -d'|' -f6 | sed 's/MX://')
-            local s_data=$(echo "$r" | cut -d'|' -f7 | sed 's/SOA://')
-            local a_disp=$(echo "$a_data" | cut -d':' -f4)
-            local c_disp=$(echo "$c_data" | cut -d':' -f4)
-            local m_disp=$(echo "$m_data" | cut -d':' -f4)
-            local s_disp=$(echo "$s_data" | cut -d':' -f4)
-            echo "$domain,$dns_name,$dns_ip,$a_disp" >> "$A_REPORT_FILE"
-            echo "$domain,$dns_name,$dns_ip,$c_disp" >> "$CNAME_REPORT_FILE"
-            echo "$domain,$dns_name,$dns_ip,$m_disp" >> "$MX_REPORT_FILE"
-            echo "$domain,$dns_name,$dns_ip,$s_disp" >> "$SOA_REPORT_FILE"
-        else
-            local disp=$(echo "$r" | cut -d'|' -f7)
-            case "$rt" in
-                "A") echo "$domain,$dns_name,$dns_ip,$disp" >> "$A_REPORT_FILE" ;;
-                "CNAME") echo "$domain,$dns_name,$dns_ip,$disp" >> "$CNAME_REPORT_FILE" ;;
-                "MX") echo "$domain,$dns_name,$dns_ip,$disp" >> "$MX_REPORT_FILE" ;;
-                "SOA") echo "$domain,$dns_name,$dns_ip,$disp" >> "$SOA_REPORT_FILE" ;;
-            esac
-        fi
+        [ "$rt" != "$record_type" ] && continue
+        local disp=$(echo "$r" | cut -d'|' -f7)
+        case "$rt" in
+            "A")    echo "$domain,$dns_name,$dns_ip,$disp" >> "$A_REPORT_FILE" ;;
+            "CNAME") echo "$domain,$dns_name,$dns_ip,$disp" >> "$CNAME_REPORT_FILE" ;;
+            "MX")   echo "$domain,$dns_name,$dns_ip,$disp" >> "$MX_REPORT_FILE" ;;
+            "SOA")  echo "$domain,$dns_name,$dns_ip,$disp" >> "$SOA_REPORT_FILE" ;;
+            "TXT")  echo "$domain,$dns_name,$dns_ip,$disp" >> "$TXT_REPORT_FILE" ;;
+        esac
     done
 }
 
@@ -751,13 +738,7 @@ emit_dns_prometheus() {
         local dns_name=$(echo "$r" | cut -d'|' -f1)
         local rt=$(echo "$r" | cut -d'|' -f3)
         local now_ts=$(date '+%s')
-        if [ "$rt" = "ALL" ]; then
-            for sub in A CNAME MX SOA; do
-                PROM_TIMESTAMP_LINES+=("dns_query_last_test_timestamp{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\"} $now_ts")
-            done
-        else
-            PROM_TIMESTAMP_LINES+=("dns_query_last_test_timestamp{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} $now_ts")
-        fi
+        PROM_TIMESTAMP_LINES+=("dns_query_last_test_timestamp{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} $now_ts")
     done
 
     for r in "${results[@]}"; do
@@ -765,94 +746,44 @@ emit_dns_prometheus() {
         local dns_ip=$(echo "$r" | cut -d'|' -f2)
         local rt=$(echo "$r" | cut -d'|' -f3)
 
-        if [ "$rt" = "ALL" ]; then
-            for sub in A CNAME MX SOA; do
-                case "$sub" in
-                    A)     local data=$(echo "$r" | cut -d'|' -f4 | sed 's/A://') ;;
-                    CNAME) local data=$(echo "$r" | cut -d'|' -f5 | sed 's/CNAME://') ;;
-                    MX)    local data=$(echo "$r" | cut -d'|' -f6 | sed 's/MX://') ;;
-                    SOA)   local data=$(echo "$r" | cut -d'|' -f7 | sed 's/SOA://') ;;
-                esac
-                local s=$(echo "$data" | cut -d':' -f1)
-                local t=$(echo "$data" | cut -d':' -f2)
-                local t_ms=$(echo "$t" | sed 's/ms//')
-                local raw=$(echo "$data" | cut -d':' -f3)
-                # Sanitize result for Prometheus label value: escape double quotes, remove newlines/tabs
-                local safe_result=$(echo "$raw" | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 200)
-                # Extract country_code: A record uses raw IP; CNAME extracts first IP from final node
-                local country_code="N/A"
-                if [ "$ENABLE_GEOIP" = "true" ]; then
-                    if [ "$sub" = "A" ]; then
-                        local first_ip=$(echo "$raw" | awk '{print $1}')
-                        country_code=$(get_ip_country "$first_ip")
-                        [ -z "$country_code" ] && country_code="N/A"
-                    elif [ "$sub" = "CNAME" ]; then
-                        # raw format: "chain = IP" or just "IP" — extract the last IP after " = "
-                        local cname_ip="$raw"
-                        [[ "$cname_ip" == *" = "* ]] && cname_ip="${cname_ip##* = }"
-                        local first_ip=$(echo "$cname_ip" | awk '{print $1}')
-                        country_code=$(get_ip_country "$first_ip")
-                        [ -z "$country_code" ] && country_code="N/A"
-                    fi
-                fi
-                case "$s" in
-                    SUCCESS)
-                        PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
-                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",error_type=\"\"} 0")
-                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",country_code=\"$country_code\"} 0")
-                        PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
-                        ;;
-                    ERROR)
-                        local err_msg=$(echo "$data" | cut -d':' -f5 | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 100)
-                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",error_type=\"$err_msg\"} 1")
-                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\"} 0")
-                        ;;
-                    NO_RECORD)
-                        PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\"} 1")
-                        PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$sub\",category=\"$category\",error_type=\"\"} 0")
-                        ;;
-                esac
-            done
-        else
-            local status=$(echo "$r" | cut -d'|' -f4)
-            local time_val=$(echo "$r" | cut -d'|' -f5)
-            local t_ms=$(echo "$time_val" | sed 's/ms//')
-            local raw=$(echo "$r" | cut -d'|' -f6)
-            # Sanitize result for Prometheus label value: escape double quotes, remove newlines/tabs
-            local safe_result=$(echo "$raw" | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 200)
-            # Extract country_code: A record uses raw IP; CNAME extracts first IP from final node
-            local country_code="N/A"
-            if [ "$ENABLE_GEOIP" = "true" ]; then
-                if [ "$rt" = "A" ]; then
-                    local first_ip=$(echo "$raw" | awk '{print $1}')
-                    country_code=$(get_ip_country "$first_ip")
-                    [ -z "$country_code" ] && country_code="N/A"
-                elif [ "$rt" = "CNAME" ]; then
-                    local cname_ip="$raw"
-                    [[ "$cname_ip" == *" = "* ]] && cname_ip="${cname_ip##* = }"
-                    local first_ip=$(echo "$cname_ip" | awk '{print $1}')
-                    country_code=$(get_ip_country "$first_ip")
-                    [ -z "$country_code" ] && country_code="N/A"
-                fi
+        local status=$(echo "$r" | cut -d'|' -f4)
+        local time_val=$(echo "$r" | cut -d'|' -f5)
+        local t_ms=$(echo "$time_val" | sed 's/ms//')
+        local raw=$(echo "$r" | cut -d'|' -f6)
+        # Sanitize result for Prometheus label value: escape double quotes, remove newlines/tabs
+        local safe_result=$(echo "$raw" | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 200)
+        # Extract country_code: A record uses raw IP; CNAME extracts first IP from final node
+        local country_code="N/A"
+        if [ "$ENABLE_GEOIP" = "true" ]; then
+            if [ "$rt" = "A" ]; then
+                local first_ip=$(echo "$raw" | awk '{print $1}')
+                country_code=$(get_ip_country "$first_ip")
+                [ -z "$country_code" ] && country_code="N/A"
+            elif [ "$rt" = "CNAME" ]; then
+                local cname_ip="$raw"
+                [[ "$cname_ip" == *" = "* ]] && cname_ip="${cname_ip##* = }"
+                local first_ip=$(echo "$cname_ip" | awk '{print $1}')
+                country_code=$(get_ip_country "$first_ip")
+                [ -z "$country_code" ] && country_code="N/A"
             fi
-            case "$status" in
-                SUCCESS)
-                    PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
-                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
-                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
-                    PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
-                    ;;
-                ERROR)
-                    local err_msg=$(echo "$r" | cut -d'|' -f8 | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 100)
-                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"$err_msg\"} 1")
-                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 0")
-                    ;;
-                NO_RECORD)
-                    PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 1")
-                    PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
-                    ;;
-            esac
         fi
+        case "$status" in
+            SUCCESS)
+                PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
+                PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
+                ;;
+            ERROR)
+                local err_msg=$(echo "$r" | cut -d'|' -f8 | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 100)
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"$err_msg\"} 1")
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 0")
+                ;;
+            NO_RECORD)
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 1")
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
+                ;;
+        esac
     done
 }
 
@@ -879,28 +810,11 @@ write_prometheus_final() {
         while IFS= read -r r; do
             [ -z "$r" ] && continue
             local dns_name=$(echo "$r" | cut -d'|' -f1)
-            local rt=$(echo "$r" | cut -d'|' -f3)
             srv_names+=("$dns_name")
 
-            if [ "$rt" = "ALL" ]; then
-                local a_data=$(echo "$r" | cut -d'|' -f4 | sed 's/A://')
-                local c_data=$(echo "$r" | cut -d'|' -f5 | sed 's/CNAME://')
-                local m_data=$(echo "$r" | cut -d'|' -f6 | sed 's/MX://')
-                local s_data=$(echo "$r" | cut -d'|' -f7 | sed 's/SOA://')
-                local a_s=$(echo "$a_data" | cut -d':' -f1)
-                local a_raw=$(echo "$a_data" | cut -d':' -f3)
-                local c_s=$(echo "$c_data" | cut -d':' -f1)
-                local c_raw=$(echo "$c_data" | cut -d':' -f3)
-                local m_s=$(echo "$m_data" | cut -d':' -f1)
-                local m_raw=$(echo "$m_data" | cut -d':' -f3)
-                local s_s=$(echo "$s_data" | cut -d':' -f1)
-                local s_raw=$(echo "$s_data" | cut -d':' -f3)
-                srv_values+=("A:${a_s}:${a_raw}|CNAME:${c_s}:${c_raw}|MX:${m_s}:${m_raw}|SOA:${s_s}:${s_raw}")
-            else
-                local status=$(echo "$r" | cut -d'|' -f4)
-                local raw=$(echo "$r" | cut -d'|' -f6)
-                srv_values+=("STATUS:${status}|RAW:${raw}")
-            fi
+            local status=$(echo "$r" | cut -d'|' -f4)
+            local raw=$(echo "$r" | cut -d'|' -f6)
+            srv_values+=("STATUS:${status}|RAW:${raw}")
         done < "$tmp_file"
 
         # First server is baseline
@@ -1125,6 +1039,7 @@ echo "A record report: $A_REPORT_FILE"
 echo "CNAME record report: $CNAME_REPORT_FILE"
 echo "MX record report: $MX_REPORT_FILE"
 echo "SOA record report: $SOA_REPORT_FILE"
+echo "TXT record report: $TXT_REPORT_FILE"
 echo "Delay between DNS queries: ${QUERY_DELAY}s"
 echo "Delay between domains: ${DOMAIN_DELAY}s"
 echo "====================================================="
@@ -1166,6 +1081,7 @@ else
 fi
 echo "Domain,DNS Name,DNS IP,Result" > "$MX_REPORT_FILE"
 echo "Domain,DNS Name,DNS IP,Result (SOA record - full line from AUTHORITY)" > "$SOA_REPORT_FILE"
+echo "Domain,DNS Name,DNS IP,Result (TXT record)" > "$TXT_REPORT_FILE"
 
 # Parse DNS servers
 declare -a dns_names dns_ips
@@ -1295,6 +1211,7 @@ log "  A record report: $A_REPORT_FILE"
 log "  CNAME record report: $CNAME_REPORT_FILE"
 log "  MX record report: $MX_REPORT_FILE"
 log "  SOA record report: $SOA_REPORT_FILE"
+log "  TXT record report: $TXT_REPORT_FILE"
 
 # Write Prometheus summary metrics
 run_ts=$(date +%s)
