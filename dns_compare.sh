@@ -956,6 +956,56 @@ daemon_cleanup() {
 trap daemon_cleanup SIGTERM SIGINT
 
 # ====================================================
+# Snapshot I/O functions
+# ====================================================
+
+# Snapshot: append one record to a temp file, then finalize as JSON at round end
+_SNAP_TMPFILE=""
+
+init_snapshot_round() {
+    _SNAP_TMPFILE=$(mktemp "${SNAPSHOT_FILE}.XXXXXX.tmp")
+}
+
+save_snapshot_record() {
+    local key="$1" value="$2"
+    # Sanitize value for JSON: escape backslashes, quotes, and control chars
+    value=$(echo "$value" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g' | tr -d '\n\r' | head -c 500)
+    echo "${key}=${value}" >> "$_SNAP_TMPFILE"
+}
+
+finalize_snapshot() {
+    local timestamp="$1"
+    [ -z "$_SNAP_TMPFILE" ] && [ ! -f "$_SNAP_TMPFILE" ] && return 1
+
+    # Build JSON from temp file
+    {
+        echo "{\"timestamp\":\"${timestamp}\",\"records\":{"
+        local first=true
+        while IFS='=' read -r key value; do
+            [ -z "$key" ] && continue
+            if [ "$first" = "true" ]; then
+                first=false
+            else
+                echo ","
+            fi
+            printf '"%s":"%s"' "$key" "$value"
+        done < "$_SNAP_TMPFILE"
+        echo "}}"
+    } > "${SNAPSHOT_FILE}.new"
+    mv "${SNAPSHOT_FILE}.new" "$SNAPSHOT_FILE"
+    rm -f "$_SNAP_TMPFILE"
+    _SNAP_TMPFILE=""
+}
+
+# Load a single key from snapshot; prints value to stdout, returns 1 if not found
+load_snapshot_value() {
+    local key="$1"
+    [ ! -f "$SNAPSHOT_FILE" ] && return 1
+    grep -o "\"${key}\":\"[^\"]*\"" "$SNAPSHOT_FILE" 2>/dev/null | sed "s/\"${key}\":\"//; s/\"$//" | head -1
+    [ ${PIPESTATUS[0]} -eq 0 ] && return 0 || return 1
+}
+
+# ====================================================
 # Main
 # ====================================================
 
