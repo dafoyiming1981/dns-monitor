@@ -7,3 +7,6 @@ morganstanley.com
 
 [cdn_ica:CNAME]
 ica.mydesk.morganstanley.com
+
+[txt_spf:TXT]
+google.com

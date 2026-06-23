@@ -1,4 +1,4 @@
-# DNS 多服务器对比测试工具 (Multi-DNS Comparison Test v7.18)
+# DNS 多服务器对比测试工具 (Multi-DNS Comparison Test v8.0)
 
 ## 目录
 
@@ -20,7 +20,7 @@
 本脚本用于同时对多个 DNS 服务器进行域名解析查询，对比返回结果是否一致。主要功能：
 
 - **多 DNS 并行对比** — 同时对 5 个 DNS 服务器（114、阿里、Google、腾讯、Cloudflare）发起查询
-- **多记录类型支持** — A、CNAME、MX、SOA，以及 ALL 模式一次性查询全部
+- **多记录类型支持** — A、CNAME、MX、SOA、TXT 记录（TXT 自动分类：SPF/DMARC/DKIM/OTHER）
 - **差异检测** — 以第一台 DNS 为基线，逐一对比其他 DNS 的返回结果
 - **CNAME 链解析** — 递归跟踪 CNAME 链（最多 10 层）
 - **Prometheus 指标输出** — 支持 textfile collector 模式，自动写入 `.prom` 文件
@@ -55,6 +55,9 @@
 # 测试 MX 记录
 ./dns_compare.sh -d morganstanley.com -t MX
 
+# 测试 TXT 记录
+./dns_compare.sh -d google.com -t TXT
+
 # 关闭 GeoIP 加速测试
 ./dns_compare.sh -d example.com -t A --no-geoip
 ```
@@ -80,7 +83,7 @@
 |------|------|--------|
 | `-f, --file FILE` | 指定域名列表文件 | `domains.txt` |
 | `-d, --domain DOMAIN` | 指定单个域名 | - |
-| `-t, --type TYPE` | 设置记录类型（A/CNAME/MX/SOA/ALL） | `ALL` |
+| `-t, --type TYPE` | 设置记录类型（A/CNAME/MX/SOA/TXT） | `A` |
 | `-o, --output DIR` | 指定输出目录 | `.` |
 | `-v, --verbose` | 显示详细输出 | 关闭 |
 | `--geoip` | 启用 IP 地理位置 | 开启 |
@@ -110,10 +113,14 @@ domains:
   - domain: ica.mydesk.morganstanley.com
     type: CNAME
     category: cdn_ica
+
+  - domain: google.com
+    type: TXT
+    category: txt_spf
 ```
 
 - `domain` — 必填，要测试的域名
-- `type` — 可选，记录类型：`A`、`CNAME`、`MX`、`SOA`、`ALL`，默认 `ALL`
+- `type` — 可选，记录类型：`A`、`CNAME`、`MX`、`SOA`、`TXT`，默认 `A`
 - `category` — 可选，分组标签，用于终端显示和 Prometheus 统计
 
 ### 4.2 JSON 格式
@@ -122,7 +129,8 @@ domains:
 {
   "domains": [
     {"domain": "b2enew.bankofchina.com", "type": "A", "category": "bank_core"},
-    {"domain": "morganstanley.com", "type": "MX", "category": "mail_ms"}
+    {"domain": "morganstanley.com", "type": "MX", "category": "mail_ms"},
+    {"domain": "google.com", "type": "TXT", "category": "txt_spf"}
   ]
 }
 ```
@@ -139,6 +147,9 @@ morganstanley.com
 
 [cdn_ica:CNAME]
 ica.mydesk.morganstanley.com
+
+[txt_spf:TXT]
+google.com
 ```
 
 脚本通过文件扩展名（`.yaml`/`.yml`/`.json`）自动识别格式，传统文本格式通过 `[分类:类型]` 语法解析。
@@ -160,6 +171,7 @@ ica.mydesk.morganstanley.com
 | `dns_cname_report_*.csv` | CNAME 记录 CSV 报告 |
 | `dns_mx_report_*.csv` | MX 记录 CSV 报告 |
 | `dns_soa_report_*.csv` | SOA 记录 CSV 报告 |
+| `dns_txt_report_*.csv` | TXT 记录 CSV 报告（含 SPF/DMARC/DKIM/OTHER 分类） |
 
 ### Prometheus 输出文件（启用 --prom-dir 时）
 
