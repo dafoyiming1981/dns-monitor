@@ -1001,8 +1001,15 @@ finalize_snapshot() {
 load_snapshot_value() {
     local key="$1"
     [ ! -f "$SNAPSHOT_FILE" ] && return 1
-    grep -o "\"${key}\":\"[^\"]*\"" "$SNAPSHOT_FILE" 2>/dev/null | sed "s/\"${key}\":\"//; s/\"$//" | head -1
-    [ ${PIPESTATUS[0]} -eq 0 ] && return 0 || return 1
+    local escaped_key
+    escaped_key=$(echo "$key" | sed 's/[.[\*^$()+?{|]/\\&/g')
+    local result
+    result=$(grep -o "\"${escaped_key}\":\"[^\"]*\"" "$SNAPSHOT_FILE" 2>/dev/null | sed "s/\"${escaped_key}\":\"//; s/\"$//" | head -1)
+    if [ -n "$result" ]; then
+        echo "$result"
+        return 0
+    fi
+    return 1
 }
 
 # ====================================================
