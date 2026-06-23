@@ -10,8 +10,9 @@
 - [6. Prometheus 集成](#6-prometheus-集成)
 - [7. 告警规则配置](#7-告警规则配置)
 - [8. RHEL 8 部署指南](#8-rhel-8-部署指南)
-- [9. 定时任务配置](#9-定时任务配置)
-- [10. 运维维护](#10-运维维护)
+- [9. 守护进程模式（持续监控）](#9-守护进程模式持续监控)
+- [10. 定时任务配置](#10-定时任务配置)
+- [11. 运维维护](#11-运维维护)
 
 ---
 
@@ -317,7 +318,51 @@ curl http://localhost:9100/metrics | grep dns_query
 
 ---
 
-## 9. 定时任务配置
+## 9. 守护进程模式（持续监控）
+
+以守护进程模式持续运行，可配置检测间隔（秒级），并自动追踪 DNS 记录变化：
+
+```bash
+# 前台守护进程模式，每 30 秒一轮
+./dns_compare.sh --daemon --interval 30 -f domains.json
+
+# 限制最多运行 N 轮
+./dns_compare.sh --daemon --interval 60 --max-iterations 10 -f domains.json
+
+# 自定义变化日志路径
+./dns_compare.sh --daemon --interval 30 --change-log /var/log/dns-changes.log -f domains.json
+```
+
+### 守护进程模式输出文件
+
+守护进程模式下使用固定文件名（每轮覆盖），避免产生大量时间戳文件：
+
+| 文件 | 说明 |
+|------|------|
+| `dns_latest_snapshot.json` | 当前 DNS 状态快照 |
+| `dns_changes.log` | 累积变化日志（只追加） |
+| `dns_differences.log` | 累积差异日志（只追加） |
+| `dns_a_report.csv` | 最新一轮 A 记录报告 |
+| `dns_daemon.log` | 主守护进程日志 |
+
+### systemd 服务
+
+生产部署使用 systemd 管理服务（项目根目录包含 `dns_compare.service`）：
+
+```bash
+sudo cp dns_compare.service /etc/systemd/system/
+# 编辑 ExecStart 和 WorkingDirectory 匹配你的实际路径
+sudo systemctl daemon-reload
+sudo systemctl enable --now dns-compare
+
+# 查看日志
+journalctl -u dns-compare -f
+systemctl status dns-compare
+```
+
+---
+
+## 10. 定时任务配置
 
 ### 9.1 使用 crontab
 
