@@ -1061,8 +1061,13 @@ compare_with_snapshot() {
 # In daemon mode, initialize output files for each round.
 # Truncates CSV/report files each round; logs are always appended.
 init_daemon_output_files() {
-    echo "Domain,DNS Name,DNS IP,Result (IP[COUNTRY])" > "$A_REPORT_FILE"
-    echo "Domain,DNS Name,DNS IP,Result (CNAME Chain with IP[COUNTRY])" > "$CNAME_REPORT_FILE"
+    if [ "$ENABLE_GEOIP" = "true" ]; then
+        echo "Domain,DNS Name,DNS IP,Result (IP[COUNTRY])" > "$A_REPORT_FILE"
+        echo "Domain,DNS Name,DNS IP,Result (CNAME Chain with IP[COUNTRY])" > "$CNAME_REPORT_FILE"
+    else
+        echo "Domain,DNS Name,DNS IP,Result" > "$A_REPORT_FILE"
+        echo "Domain,DNS Name,DNS IP,Result (CNAME Chain)" > "$CNAME_REPORT_FILE"
+    fi
     echo "Domain,DNS Name,DNS IP,Result" > "$MX_REPORT_FILE"
     echo "Domain,DNS Name,DNS IP,Result (SOA record - full line from AUTHORITY)" > "$SOA_REPORT_FILE"
     echo "Domain,DNS Name,DNS IP,Result (TXT record)" > "$TXT_REPORT_FILE"
@@ -1198,6 +1203,46 @@ run_one_round() {
     if [ $err_cnt -gt 0 ]; then
         log "\n${BOLD_RED}✗ Errors occurred in $err_cnt domain(s)${NC}"
         log "${BOLD_RED}  Check the error log for details: $ERROR_LOG_FILE${NC}"
+    fi
+
+    if [ "$ENABLE_GEOIP" = "true" ]; then
+        log "\n${CYAN}IP Geolocation Statistics:${NC}"
+        log "  Unique IPs resolved: ${#IP_COUNTRY_CACHE[@]}"
+        log "  GeoIP log: $GEOIP_LOG_FILE"
+    fi
+
+    log "\n${CYAN}Statistics by Category:${NC}"
+    declare -a cat_names=()
+    declare -a cat_counts=()
+    for ((i=0; i<${#DOMAIN_ORDER[@]}; i++)); do
+        c="${DOMAIN_CATEGORY_ARR[$i]}"
+        found=0
+        for ((j=0; j<${#cat_names[@]}; j++)); do
+            [ "${cat_names[$j]}" = "$c" ] && ((cat_counts[$j]++)) && found=1 && break
+        done
+        [ $found -eq 0 ] && cat_names+=("$c") && cat_counts+=(1)
+    done
+    for ((j=0; j<${#cat_names[@]}; j++)); do
+        log "  ${PURPLE}${cat_names[$j]}:${NC} ${cat_counts[$j]} domains"
+    done
+
+    log "\n${GREEN}Output files:${NC}"
+    if [ "$DAEMON_MODE" = "true" ]; then
+        log "  Daemon log: $LOG_FILE"
+        log "  Change log: $CHANGE_LOG_FILE"
+        log "  Differences log: $DIFF_LOG_FILE"
+        log "  Snapshot: $SNAPSHOT_FILE"
+    else
+        log "  Detailed log: $LOG_FILE"
+        log "  ${BOLD_YELLOW}Difference log: $DIFF_LOG_FILE${NC}"
+        log "  ${BOLD_RED}Error log: $ERROR_LOG_FILE${NC}"
+        [ "$ENABLE_GEOIP" = "true" ] && log "  ${CYAN}GeoIP log: $GEOIP_LOG_FILE${NC}"
+        log "  Summary report: $SUMMARY_FILE"
+        log "  A record report: $A_REPORT_FILE"
+        log "  CNAME record report: $CNAME_REPORT_FILE"
+        log "  MX record report: $MX_REPORT_FILE"
+        log "  SOA record report: $SOA_REPORT_FILE"
+        log "  TXT record report: $TXT_REPORT_FILE"
     fi
 
     # Finalize snapshot for this round
