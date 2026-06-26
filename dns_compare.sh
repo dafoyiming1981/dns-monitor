@@ -138,16 +138,19 @@ for item in items:
     category = item.get('category', 'default').strip()
     if rtype not in ('A', 'CNAME', 'MX', 'SOA', 'TXT'):
         rtype = 'A'
+    stability_dns = item.get('stability_dns_servers', [])
+    stability_dns_str = '|'.join(stability_dns) if stability_dns else ''
     if domain:
-        print(f'{domain}\t{rtype}\t{category}')
+        print(f'{domain}\t{rtype}\t{category}\t{stability_dns_str}')
 " 2>&1) || { log "${RED}Error parsing JSON/YAML: $parsed${NC}"; return 1; }
 
     local idx=0
-    while IFS=$'\t' read -r domain rtype category; do
+    while IFS=$'\t' read -r domain rtype category stability_dns; do
         [ -z "$domain" ] && continue
         DOMAIN_ORDER[$idx]="$domain"
         DOMAIN_CONFIG_ARR[$idx]="$rtype"
         DOMAIN_CATEGORY_ARR[$idx]="$category"
+        DOMAIN_STABILITY_DNS_ARR[$idx]="$stability_dns"
         ((idx++))
     done <<< "$parsed"
 
@@ -204,6 +207,7 @@ get_ip_country() {
 DOMAIN_ORDER=()
 DOMAIN_CONFIG_ARR=()
 DOMAIN_CATEGORY_ARR=()
+DOMAIN_STABILITY_DNS_ARR=()
 
 parse_domain_file() {
     local file="$1"
@@ -706,11 +710,21 @@ init_prometheus() {
     # Accumulators for grouped prometheus output
     PROM_DURATION_LINES=()
     PROM_ERROR_LINES=()
+    PROM_SUCCESS_LINES=()
     PROM_NODATA_LINES=()
     PROM_INFO_LINES=()
     PROM_TIMESTAMP_LINES=()
     PROM_DOMAIN_LIST=()
     PROM_RAW_TMP=()
+    # Change detection metrics accumulators (daemon mode)
+    PROM_CHANGE_LINES=()
+    PROM_CHANGE_TYPE_COUNTS=()
+    PROM_CHANGE_COUNT_CHANGE=0
+    PROM_CHANGE_COUNT_NEW=0
+    PROM_CHANGE_COUNT_GONE=0
+    PROM_CHANGE_COUNT_ERR=0
+    # MX stability metrics accumulators
+    PROM_MX_STABILITY_LINES=()
 }
 
 emit_dns_prometheus() {
@@ -749,8 +763,8 @@ emit_dns_prometheus() {
         local time_val=$(echo "$r" | cut -d'|' -f5)
         local t_ms=$(echo "$time_val" | sed 's/ms//')
         local raw=$(echo "$r" | cut -d'|' -f6)
-        # Sanitize result for Prometheus label value: escape double quotes, remove newlines/tabs
-        local safe_result=$(echo "$raw" | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 200)
+        # Sanitize result for Prometheus label value: remove chars illegal in label values
+        local safe_result=$(echo "$raw" | sed 's/"/\\"/g; s/\\/\\\\/g; s/[{}=]//g; s/[[:cntrl:]]//g' | head -c 200)
         # Extract country_code: A record uses raw IP; CNAME extracts first IP from final node
         local country_code="N/A"
         if [ "$ENABLE_GEOIP" = "true" ]; then
@@ -770,6 +784,7 @@ emit_dns_prometheus() {
             SUCCESS)
                 PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
                 PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
+                PROM_SUCCESS_LINES+=("dns_query_success{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 1")
                 PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
                 PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
                 ;;
@@ -838,6 +853,10 @@ write_prometheus_final() {
         echo "# TYPE dns_query_error gauge"
         printf '%s\n' "${PROM_ERROR_LINES[@]}"
         echo ""
+        echo "# HELP dns_query_success DNS query success status (1=success, 0=failed)"
+        echo "# TYPE dns_query_success gauge"
+        printf '%s\n' "${PROM_SUCCESS_LINES[@]}"
+        echo ""
         echo "# HELP dns_query_nodata DNS query no-data status (1=no record, 0=has data)"
         echo "# TYPE dns_query_nodata gauge"
         printf '%s\n' "${PROM_NODATA_LINES[@]}"
@@ -853,6 +872,20 @@ write_prometheus_final() {
         echo "# HELP dns_query_last_test_timestamp Unix timestamp of last test for this domain/server/type"
         echo "# TYPE dns_query_last_test_timestamp gauge"
         printf '%s\n' "${PROM_TIMESTAMP_LINES[@]}"
+        echo ""
+        echo "# HELP dns_change_detected DNS resolution change detected compared to previous round"
+        echo "# TYPE dns_change_detected gauge"
+        if [ ${#PROM_CHANGE_LINES[@]} -gt 0 ]; then
+            printf '%s\n' "${PROM_CHANGE_LINES[@]}"
+        else
+            echo "dns_change_detected{domain=\"none\",server=\"none\",record_type=\"none\",category=\"none\",change_type=\"none\"} 0"
+        fi
+        if [ ${#PROM_MX_STABILITY_LINES[@]} -gt 0 ]; then
+            echo ""
+            echo "# HELP dns_mx_stability MX record stability test result distribution"
+            echo "# TYPE dns_mx_stability gauge"
+            printf '%s\n' "${PROM_MX_STABILITY_LINES[@]}"
+        fi
     } > "$PROM_METRICS_FILE" 2>/dev/null
 
     # Summary metrics
@@ -877,6 +910,13 @@ write_prometheus_final() {
             echo "# HELP dns_test_last_run_timestamp Unix timestamp of last test run"
             echo "# TYPE dns_test_last_run_timestamp gauge"
             echo "dns_test_last_run_timestamp $run_ts"
+            echo ""
+            echo "# HELP dns_changes_total DNS resolution changes detected since last round"
+            echo "# TYPE dns_changes_total gauge"
+            echo "dns_changes_total{change_type=\"change\"} ${PROM_CHANGE_COUNT_CHANGE:-0}"
+            echo "dns_changes_total{change_type=\"new\"} ${PROM_CHANGE_COUNT_NEW:-0}"
+            echo "dns_changes_total{change_type=\"gone\"} ${PROM_CHANGE_COUNT_GONE:-0}"
+            echo "dns_changes_total{change_type=\"error\"} ${PROM_CHANGE_COUNT_ERR:-0}"
         } > "$PROM_SUMMARY_FILE" 2>/dev/null
     fi
 
@@ -922,6 +962,8 @@ Options:
   --delay SECONDS          Set delay between queries (default: $QUERY_DELAY)
   --domain-delay SECONDS   Set delay between domains (default: $DOMAIN_DELAY)
   --prom-dir DIR           Enable Prometheus textfile collector output directory
+  --stability-test COUNT   Run MX stability test: query each DNS server COUNT times and show result distribution
+  --mx-stability N         Daemon mode: per-round lightweight MX stability check (N queries per MX domain)
 
 Record Types:
   A      - IPv4 Address records (with country codes if geoip enabled)
@@ -1037,7 +1079,7 @@ compare_with_snapshot() {
     local change_type=""
     local change_desc=""
 
-    if [ "$prev_value" = "NO_RECORD" ] || [ -z "$prev_value" ]; then
+    if [ "$prev_value" = "NO_RECORD" ] || [ -z "$prev_value" ] || [ "$prev_value" = "N/A" ]; then
         [ "$status" != "NO_RECORD" ] && [ "$status" != "ERROR" ] && change_type="NEW"
     elif [ "$prev_value" != "ERROR" ] && [ "$curr_value" = "ERROR" ]; then
         change_type="ERROR"
@@ -1056,6 +1098,18 @@ compare_with_snapshot() {
     local msg="[${ts}] ${change_type} ${domain} (${record_type}) via ${dns_server}: ${change_desc}"
     echo "$msg" >> "$CHANGE_LOG_FILE"
     log "${YELLOW}  ${msg}${NC}"
+
+    # Emit Prometheus change detection metrics
+    if [ -n "$PROM_METRICS_FILE" ]; then
+        local safe_desc=$(echo "$change_desc" | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 200)
+        PROM_CHANGE_LINES+=("dns_change_detected{domain=\"$domain\",server=\"$dns_server\",record_type=\"$record_type\",change_type=\"$change_type\",description=\"$safe_desc\"} 1")
+        case "$change_type" in
+            CHANGE) PROM_CHANGE_COUNT_CHANGE=$(( ${PROM_CHANGE_COUNT_CHANGE:-0} + 1 )) ;;
+            NEW)    PROM_CHANGE_COUNT_NEW=$(( ${PROM_CHANGE_COUNT_NEW:-0} + 1 )) ;;
+            GONE)   PROM_CHANGE_COUNT_GONE=$(( ${PROM_CHANGE_COUNT_GONE:-0} + 1 )) ;;
+            ERROR)  PROM_CHANGE_COUNT_ERR=$(( ${PROM_CHANGE_COUNT_ERR:-0} + 1 )) ;;
+        esac
+    fi
 }
 
 # In daemon mode, initialize output files for each round.
@@ -1139,6 +1193,12 @@ run_one_round() {
     diff_cnt=0
     err_cnt=0
     no_record_cnt=0
+    PROM_CHANGE_COUNT_CHANGE=0
+    PROM_CHANGE_COUNT_NEW=0
+    PROM_CHANGE_COUNT_GONE=0
+    PROM_CHANGE_COUNT_ERR=0
+    PROM_CHANGE_LINES=()
+    PROM_MX_STABILITY_LINES=()
 
     # Main domain iteration loop
     for ((didx=0; didx<${#DOMAIN_ORDER[@]}; didx++)); do
@@ -1195,6 +1255,19 @@ run_one_round() {
             fi
         fi
     done
+
+    # Daemon mode: optional lightweight MX stability check per round
+    if [ "$DAEMON_MODE" = "true" ] && [ "$MX_STABILITY_COUNT" -gt 0 ]; then
+        for ((didx=0; didx<${#DOMAIN_ORDER[@]}; didx++)); do
+            local d="${DOMAIN_ORDER[$didx]}"
+            local t="${DOMAIN_CONFIG_ARR[$didx]}"
+            if [ "$t" = "MX" ]; then
+                local custom_dns="${DOMAIN_STABILITY_DNS_ARR[$didx]}"
+                log "${CYAN}  MX stability check ($MX_STABILITY_COUNT queries) for $d${NC}"
+                run_stability_test "$d" "$MX_STABILITY_COUNT" "$custom_dns"
+            fi
+        done
+    fi
 
     log "\n${GREEN}════════════════════════════════════════════════════════════${NC}"
     log "${GREEN}Round $round_num completed!${NC}"
@@ -1292,6 +1365,10 @@ DAEMON_RUNNING=true
 CHANGE_LOG_FILE=""
 SNAPSHOT_FILE="dns_latest_snapshot.json"
 
+# Stability test variables
+STABILITY_TEST_COUNT=0
+MX_STABILITY_COUNT=0
+
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help) show_help; exit 0 ;;
@@ -1317,6 +1394,8 @@ while [[ $# -gt 0 ]]; do
         --interval) DAEMON_INTERVAL="$2"; shift 2 ;;
         --max-iterations) DAEMON_MAX_ITER="$2"; shift 2 ;;
         --change-log) CHANGE_LOG_FILE="$2"; shift 2 ;;
+        --stability-test) STABILITY_TEST_COUNT="$2"; shift 2 ;;
+        --mx-stability) MX_STABILITY_COUNT="$2"; shift 2 ;;
         -*)
             echo -e "${RED}Error: Unknown option $1${NC}"
             show_help
@@ -1397,6 +1476,161 @@ log "  Max CNAME depth: ${MAX_CNAME_DEPTH}"
 log "  CNAME comparison: Chain structure only (final IP ignored)"
 log "  IP Geolocation: $([ "$ENABLE_GEOIP" = "true" ] && echo "ENABLED (IP[COUNTRY] format, 不影响比较)" || echo "DISABLED")"
 log "========================================"
+
+# ====================================================
+# MX Stability Test
+# ====================================================
+
+# Run stability test: query each DNS server COUNT times for the given domain's MX records
+# Output: result distribution table per DNS server
+# Optional 3rd param: pipe-separated custom DNS list (name@ip|name@ip). Overrides global DNS_SERVERS.
+run_stability_test() {
+    local domain="$1" count="$2" custom_dns="${3:-}"
+
+    # If custom DNS servers provided, temporarily swap dns_names/dns_ips
+    local -a orig_names=() orig_ips=()
+    if [ -n "$custom_dns" ]; then
+        orig_names=("${dns_names[@]}")
+        orig_ips=("${dns_ips[@]}")
+        dns_names=()
+        dns_ips=()
+        local IFS_SAVE="$IFS"
+        IFS='|'
+        for entry in $custom_dns; do
+            local n="${entry%%@*}"
+            local ip="${entry#*@}"
+            [ -n "$n" ] && [ -n "$ip" ] && dns_names+=("$n") && dns_ips+=("$ip")
+        done
+        IFS="$IFS_SAVE"
+        log "${YELLOW}MX Stability Test: ${domain} @ ${#dns_names[@]} custom DNS servers, ${count} queries each${NC}"
+    else
+        log "${YELLOW}MX Stability Test: ${domain} @ ${#dns_names[@]} DNS servers, ${count} queries each${NC}"
+    fi
+    log "============================================================"
+
+    # Per-server result counters
+    declare -a srv_total=()
+    declare -a srv_mx_ok=()
+    declare -a srv_no_mx=()
+    declare -a srv_servfail=()
+    declare -a srv_empty=()
+    declare -a srv_other=()
+
+    for ((s=0; s<${#dns_names[@]}; s++)); do
+        srv_total[$s]=0
+        srv_mx_ok[$s]=0
+        srv_no_mx[$s]=0
+        srv_servfail[$s]=0
+        srv_empty[$s]=0
+        srv_other[$s]=0
+    done
+
+    # For each query round, query all servers sequentially
+    for ((q=1; q<=count; q++)); do
+        for ((s=0; s<${#dns_names[@]}; s++)); do
+            local name="${dns_names[$s]}"
+            local ip="${dns_ips[$s]}"
+            ((srv_total[$s]++))
+
+            local output=$(dig @"$ip" "$domain" MX +time="$QUERY_TIMEOUT" +tries=1 +noall +answer +stats 2>/dev/null)
+
+            if [ -z "$output" ]; then
+                ((srv_empty[$s]++))
+            elif echo "$output" | grep -q "SERVFAIL"; then
+                ((srv_servfail[$s]++))
+            elif echo "$output" | grep -qi "IN.*MX"; then
+                ((srv_mx_ok[$s]++))
+            elif echo "$output" | grep -q "NOERROR"; then
+                ((srv_no_mx[$s]++))
+            else
+                ((srv_other[$s]++))
+            fi
+        done
+    done
+
+    # Print header
+    printf "\n${BLUE}%-12s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s${NC}\n" \
+        "DNS Server" "MX_OK" "NO_MX" "SERVFAIL" "EMPTY" "OTHER" "Total"
+
+    printf "${BLUE}%-12s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s ${BLUE}%10s${NC}\n" \
+        "------------" "----------" "----------" "----------" "----------" "----------" "----------"
+
+    # Print per-server results
+    for ((s=0; s<${#dns_names[@]}; s++)); do
+        local name="${dns_names[$s]}"
+        local mx_ok="${srv_mx_ok[$s]}"
+        local no_mx="${srv_no_mx[$s]}"
+        local servfail="${srv_servfail[$s]}"
+        local empty="${srv_empty[$s]}"
+        local other="${srv_other[$s]}"
+        local total="${srv_total[$s]}"
+
+        # Color-code: all MX_OK = green, any issue = yellow/red
+        local color="$GREEN"
+        [ "$servfail" -gt 0 ] || [ "$empty" -gt 0 ] && color="$RED"
+        [ "$no_mx" -gt 0 ] || [ "$other" -gt 0 ] && [ "$color" = "$GREEN" ] && color="$YELLOW"
+
+        printf "${color}%-12s ${NC}%10d ${NC}%10d ${NC}%10d ${NC}%10d ${NC}%10d ${NC}%10d${NC}\n" \
+            "$name" "$mx_ok" "$no_mx" "$servfail" "$empty" "$other" "$total"
+    done
+
+    # Calculate and print summary
+    local total_ok=0 total_fail=0
+    for ((s=0; s<${#dns_names[@]}; s++)); do
+        total_ok=$((total_ok + ${srv_mx_ok[$s]} + ${srv_no_mx[$s]}))
+        total_fail=$((total_fail + ${srv_servfail[$s]} + ${srv_empty[$s]} + ${srv_other[$s]}))
+    done
+    local grand_total=$((total_ok + total_fail))
+    local ok_pct=0
+    [ "$grand_total" -gt 0 ] && ok_pct=$((total_ok * 100 / grand_total))
+
+    log "\n${GREEN}Summary: $ok_pct% success ($total_ok/$grand_total) across all servers${NC}"
+    [ "$total_fail" -gt 0 ] && log "${RED}Failures: $total_fail/$grand_total${NC}"
+
+    # Emit Prometheus MX stability metrics
+    if [ -n "$PROM_METRICS_FILE" ]; then
+        for ((s=0; s<${#dns_names[@]}; s++)); do
+            local name="${dns_names[$s]}"
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"mx_ok\"} ${srv_mx_ok[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"no_mx\"} ${srv_no_mx[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"servfail\"} ${srv_servfail[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"empty\"} ${srv_empty[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"other\"} ${srv_other[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"success_pct\"} $ok_pct")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"total_queries\"} ${srv_total[$s]}")
+        done
+    fi
+
+    # Restore original DNS servers if custom were used
+    if [ ${#orig_names[@]} -gt 0 ]; then
+        dns_names=("${orig_names[@]}")
+        dns_ips=("${orig_ips[@]}")
+    fi
+}
+
+# ---- Stability Test Gate ----
+if [ "$STABILITY_TEST_COUNT" -gt 0 ]; then
+    # Use first command-line domain or default to the first domain in DOMAIN_ORDER
+    if [ ${#CMD_DOMAINS[@]} -gt 0 ]; then
+        STABILITY_DOMAIN="${CMD_DOMAINS[0]}"
+        # Check if this domain has custom stability DNS servers in DOMAIN_ORDER
+        STABILITY_CUSTOM_DNS=""
+        for ((sd=0; sd<${#DOMAIN_ORDER[@]}; sd++)); do
+            if [ "${DOMAIN_ORDER[$sd]}" = "$STABILITY_DOMAIN" ] && [ -n "${DOMAIN_STABILITY_DNS_ARR[$sd]}" ]; then
+                STABILITY_CUSTOM_DNS="${DOMAIN_STABILITY_DNS_ARR[$sd]}"
+                break
+            fi
+        done
+    elif [ ${#DOMAIN_ORDER[@]} -gt 0 ]; then
+        STABILITY_DOMAIN="${DOMAIN_ORDER[0]}"
+        STABILITY_CUSTOM_DNS="${DOMAIN_STABILITY_DNS_ARR[0]}"
+    else
+        echo -e "${RED}No domain specified for stability test. Use -d or -f to specify.${NC}"
+        exit 1
+    fi
+    run_stability_test "$STABILITY_DOMAIN" "$STABILITY_TEST_COUNT" "$STABILITY_CUSTOM_DNS"
+    exit 0
+fi
 
 # ---- Single-run mode ----
 if [ "$DAEMON_MODE" = "false" ]; then

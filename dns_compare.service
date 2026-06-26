@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/dns-compare
-ExecStart=/opt/dns-compare/dns_compare.sh --daemon --interval 30 --prom-dir /run/textfile_collector
+ExecStart=/opt/dns-compare/dns_compare.sh -f /opt/dns-compare/domain.yml --daemon --interval 30 --prom-dir /run/textfile_collector
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

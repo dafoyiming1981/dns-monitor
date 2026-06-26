@@ -93,6 +93,8 @@
 | `--delay SECONDS` | 设置查询间延迟 | `2` |
 | `--domain-delay SECONDS` | 设置域名间延迟 | `3` |
 | `--prom-dir DIR` | 启用 Prometheus textfile collector 输出 | 默认禁用 |
+| `--stability-test COUNT` | 运行 MX 稳定性测试：每个 DNS 服务器查询 COUNT 次 | 默认禁用 |
+| `--mx-stability N` | Daemon 模式：每轮对 MX 域名额外查 N 次（轻量稳定性检查） | 默认禁用 |
 | `-h, --help` | 显示帮助信息 | - |
 
 ---
@@ -123,6 +125,21 @@ domains:
 - `domain` — 必填，要测试的域名
 - `type` — 可选，记录类型：`A`、`CNAME`、`MX`、`SOA`、`TXT`，默认 `A`
 - `category` — 可选，分组标签，用于终端显示和 Prometheus 统计
+- `stability_dns_servers` — 可选，MX 稳定性测试使用的自定义 DNS 服务器列表（格式 `name@ip`），覆盖全局 `DNS_SERVERS`
+
+### 自定义 DNS 服务器示例
+
+```yaml
+  - domain: morganstanley.com
+    type: MX
+    category: mail_ms
+    stability_dns_servers:
+      - "114@114.114.114.114"
+      - "Ali@223.5.5.5"
+      - "InternalDNS@10.0.0.1"
+```
+
+仅对 `morganstanley.com` 的 MX 稳定性测试使用这三个 DNS 服务器，正常比较仍用全局列表。
 
 ### 4.2 JSON 格式
 
@@ -198,6 +215,9 @@ google.com
 | `dns_test_errors_total` | gauge | 无 | 有错误的域名数 |
 | `dns_test_nodata_total` | gauge | 无 | 无记录的域名数 |
 | `dns_test_last_run_timestamp` | gauge | 无 | 上次测试时间戳 |
+| `dns_change_detected` | gauge | domain, server, record_type, change_type, description | 变化检测（daemon 模式，值为 1），change_type=CHANGE/NEW/GONE/ERROR |
+| `dns_changes_total` | gauge | change_type | 本轮变化总数（daemon 模式），按类型分组：change/new/gone/error |
+| `dns_mx_stability` | gauge | domain, server, result_type | MX 稳定性测试结果，result_type=mx_ok/no_mx/servfail/empty/other/success_pct/total_queries |
 
 ### 6.2 差异检测逻辑
 
@@ -216,7 +236,30 @@ google.com
 node_exporter --collector.textfile.directory=/run/textfile_collector/
 ```
 
-### 6.4 Grafana 查询示例
+### 6.4 Grafana Dashboard
+
+项目提供完整的 Grafana Dashboard JSON（`grafana_dashboard.json`），包含以下面板：
+
+| 区域 | 面板 | 说明 |
+|------|------|------|
+| Overview | Total Domains / Differences / Errors / Last Test Age | 测试运行状态概览 |
+| Change Detection | Total Changes / Value Changed / New / Gone | 本轮变化统计（daemon 模式） |
+| Change Detection | Change Event Log | 变化事件表格，显示 domain/server/类型/描述 |
+| Change Detection | Value Changes Over Time | 值变化时间线（State Timeline） |
+| Change Detection | New/Gone/Error Over Time | 新增/消失/错误事件时间线 |
+| Change Detection | Top 10 Most Changed Domains | 最频繁变化的域名排行 |
+| Difference Matrix | Difference Details | 各 DNS 服务器与基线的一致性 |
+| Latency Analysis | Avg Latency / Per-Domain Latency | 查询延迟分析 |
+| Errors & No Record | 错误/无记录表格 | 当前报错和缺失记录 |
+| Domain Details | Resolution Results / Timestamps | 域名解析详情 |
+| MX Stability | Success Rate by Server | MX 记录成功率仪表盘（按 DNS 服务器） |
+| MX Stability | OK vs Fail Over Time | 成功/失败状态时间线 |
+| MX Stability | Detail Table | MX 稳定性结果明细表（按 result_type） |
+| TXT Record Analysis | TXT Record Comparison | TXT 记录对比 |
+
+导入方式：Grafana → Import → 上传 `grafana_dashboard.json` 文件。
+
+### 6.5 Grafana 查询示例
 
 ```promql
 # Grafana Table 视图：使用 dns_query_duration_ms 作为数据源
@@ -228,6 +271,9 @@ dns_query_error{result="ERROR"} == 1
 
 # 差异检测（任何不一致的 DNS 服务器）
 dns_query_difference{server!=""} == 1
+
+# 变化检测（daemon 模式）
+dns_change_detected{change_type="change"}
 
 # 测试运行时间间隔
 time() - dns_test_last_run_timestamp
@@ -245,7 +291,9 @@ time() - dns_test_last_run_timestamp
 | DNSQueryError | critical | `dns_query_error == 1` for 2m | DNS 查询失败 |
 | DNSNoRecordFound | warning | `dns_query_nodata == 1` for 5m | 无对应记录 |
 | DNSHighLatency | info | `dns_query_duration_ms > 500` for 5m | 查询延迟过高 |
-| DNSTestRunStale | warning | 超过 15 分钟未运行 | 定时测试任务异常 |
+| DNSRecordGone | critical | `dns_change_detected{change_type="gone"} == 1` for 5m | DNS 记录消失（daemon 模式） |
+| DNSRecordChanged | info | `dns_change_detected{change_type="change"} == 1` for 2m | DNS 记录值变化（daemon 模式） |
+| DNSTestRunStale | warning | 超过 3 分钟未运行 | 测试任务异常（daemon 模式） |
 
 ### 集成到 Prometheus
 

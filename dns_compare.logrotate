@@ -1,0 +1,17 @@
+# Logrotate configuration for dns_compare daemon mode
+# Install: sudo cp dns_compare.logrotate /etc/logrotate.d/dns_compare
+
+/opt/dns-compare/*.log
+/opt/dns-compare/*.txt
+/opt/dns-compare/*.json
+{
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    dateext
+    dateformat -%Y%m%d
+}

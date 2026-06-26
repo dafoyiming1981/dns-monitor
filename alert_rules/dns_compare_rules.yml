@@ -74,16 +74,46 @@ groups:
             的 {{ $labels.record_type }} 记录查询延迟为 {{ $value }}ms。
 
       # -------------------------------------------------------
-      # Test Run Stale
-      # Triggers when no test has run for more than 15 minutes
-      # (assumes cron runs every 5 minutes)
+      # DNS Record Gone (daemon mode)
+      # Triggers when a previously working DNS record disappears
+      # -------------------------------------------------------
+      - alert: DNSRecordGone
+        expr: dns_change_detected{change_type="gone"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DNS记录消失 - {{ $labels.domain }} ({{ $labels.server }})"
+          description: >
+            {{ $labels.domain }} 的 {{ $labels.record_type }} 记录在
+            DNS服务器 {{ $labels.server }} 上已不存在，可能是配置变更或 GSLB 调度异常。
+
+      # -------------------------------------------------------
+      # DNS Record Changed (daemon mode)
+      # Triggers when a DNS resolution value changes between rounds
+      # -------------------------------------------------------
+      - alert: DNSRecordChanged
+        expr: dns_change_detected{change_type="change"} == 1
+        for: 2m
+        labels:
+          severity: info
+        annotations:
+          summary: "DNS记录变更 - {{ $labels.domain }} ({{ $labels.server }})"
+          description: >
+            {{ $labels.domain }} 的 {{ $labels.record_type }} 记录在
+            DNS服务器 {{ $labels.server }} 上发生值变化：{{ $labels.description }}。
+
+      # -------------------------------------------------------
+      # Test Run Stale (daemon mode: 3 min threshold)
+      # Triggers when no test has run for more than 3 minutes
+      # (daemon mode runs every 30-60s)
       # -------------------------------------------------------
       - alert: DNSTestRunStale
-        expr: (time() - dns_test_last_run_timestamp) > 900
+        expr: (time() - dns_test_last_run_timestamp) > 180
         for: 1m
         labels:
           severity: warning
         annotations:
           summary: "DNS测试任务已停止运行"
           description: >
-            DNS对比测试已超过 15 分钟未执行，请检查 cron 任务是否正常。
+            DNS对比测试已超过 3 分钟未执行，请检查 daemon 或 cron 任务是否正常。
