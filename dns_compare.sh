@@ -1167,6 +1167,17 @@ run_one_round() {
     PROM_CHANGE_COUNT_ERR=0
     PROM_CHANGE_LINES=()
     PROM_MX_STABILITY_LINES=()
+    PROM_DURATION_LINES=()
+    PROM_ERROR_LINES=()
+    PROM_SUCCESS_LINES=()
+    PROM_NODATA_LINES=()
+    PROM_TIMESTAMP_LINES=()
+    # Clean up old temp files from previous round
+    for old_tmp in "${PROM_RAW_TMP[@]}"; do
+        rm -f "$old_tmp" 2>/dev/null
+    done
+    PROM_RAW_TMP=()
+    PROM_DOMAIN_LIST=()
 
     # Create shared temp directory for parallel queries in this round
     PARALLEL_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/dns_compare.XXXXXX")
