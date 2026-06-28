@@ -454,6 +454,7 @@
             "renameByName": {
               "Value": "Status (0=consistent, 1=different)",
               "category": "Category",
+              "country_code": "Country Code",
               "domain": "Domain",
               "record_type": "Record Type",
               "server": "DNS Server"
@@ -998,12 +999,12 @@
               "__name__": true,
               "job": true,
               "instance": true,
-              "country_code": true,
               "Value": true
             },
             "renameByName": {
               "Value": "Timestamp",
               "category": "Category",
+              "country_code": "Country Code",
               "domain": "Domain",
               "record_type": "Record Type",
               "server": "DNS Server"
