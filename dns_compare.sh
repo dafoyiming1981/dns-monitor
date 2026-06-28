@@ -23,11 +23,12 @@ PROMETHEUS_TEXTFILE_DIR="/run/textfile_collector"
 # ----------------------------------------------------
 
 DNS_SERVERS="
+SHG@10.143.10.5
+BJV@10.144.10.5
 114@114.114.114.114
 Ali@223.5.5.5
-Google@8.8.8.8
-Tencent@119.29.29.29
 Cloudflare@1.1.1.1
+TLD@103.183.66.132
 "
 
 LOG_FILE="dns_run.log"
