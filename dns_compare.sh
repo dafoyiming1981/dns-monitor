@@ -1656,6 +1656,22 @@ if [ "$DAEMON_MODE" = "false" ]; then
 
 # ---- Daemon mode ----
 else
+    # Pre-flight check: detect duplicate domain+type+category combinations
+    local dupes=""
+    for ((dd=0; dd<${#DOMAIN_ORDER[@]}; dd++)); do
+        echo "${DOMAIN_ORDER[$dd]}|${DOMAIN_CONFIG_ARR[$dd]}|${DOMAIN_CATEGORY_ARR[$dd]}"
+    done | sort | uniq -d > /tmp/_dns_dupes_check
+    dupes=$(cat /tmp/_dns_dupes_check 2>/dev/null)
+    rm -f /tmp/_dns_dupes_check
+    if [ -n "$dupes" ]; then
+        log "${RED}ERROR: Duplicate domain entries detected in domain file:${NC}"
+        echo "$dupes" | while IFS='|' read -r d t c; do
+            log "${RED}  - $d ($t) [category: $c]${NC}"
+        done
+        log "${RED}Aborting daemon startup. Remove duplicates from your domain file before starting.${NC}"
+        exit 1
+    fi
+
     log "${GREEN}Daemon mode: running every ${DAEMON_INTERVAL}s${NC}"
     [ "$DAEMON_MAX_ITER" -gt 0 ] && log "Max iterations: $DAEMON_MAX_ITER" || log "Max iterations: infinite"
 
