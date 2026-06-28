@@ -1657,7 +1657,7 @@ if [ "$DAEMON_MODE" = "false" ]; then
 # ---- Daemon mode ----
 else
     # Pre-flight check: detect duplicate domain+type+category combinations
-    local dupes=""
+    dupes=""
     for ((dd=0; dd<${#DOMAIN_ORDER[@]}; dd++)); do
         echo "${DOMAIN_ORDER[$dd]}|${DOMAIN_CONFIG_ARR[$dd]}|${DOMAIN_CATEGORY_ARR[$dd]}"
     done | sort | uniq -d > /tmp/_dns_dupes_check
