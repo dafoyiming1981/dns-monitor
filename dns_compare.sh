@@ -30,18 +30,9 @@ Tencent@119.29.29.29
 Cloudflare@1.1.1.1
 "
 
-LOG_FILE="dns_test_$(date +%Y%m%d_%H%M%S).log"
-SUMMARY_FILE="dns_summary_$(date +%Y%m%d_%H%M%S).txt"
-REPORT_FILE="dns_report_$(date +%Y%m%d_%H%M%S).csv"
-DIFF_LOG_FILE="dns_differences_$(date +%Y%m%d_%H%M%S).log"
-ERROR_LOG_FILE="dns_errors_$(date +%Y%m%d_%H%M%S).log"
-GEOIP_LOG_FILE="dns_geoip_$(date +%Y%m%d_%H%M%S).log"
-
-A_REPORT_FILE="dns_a_report_$(date +%Y%m%d_%H%M%S).csv"
-CNAME_REPORT_FILE="dns_cname_report_$(date +%Y%m%d_%H%M%S).csv"
-MX_REPORT_FILE="dns_mx_report_$(date +%Y%m%d_%H%M%S).csv"
-SOA_REPORT_FILE="dns_soa_report_$(date +%Y%m%d_%H%M%S).csv"
-TXT_REPORT_FILE="dns_txt_report_$(date +%Y%m%d_%H%M%S).csv"
+LOG_FILE="dns_run.log"
+SUMMARY_FILE="dns_run.log"  # differences/errors appended to main log
+RESULTS_CSV="dns_results.csv"
 
 # Colors
 RED='\033[0;31m'
@@ -61,7 +52,7 @@ NC='\033[0m'
 # ====================================================
 
 log() { echo -e "$1" | tee -a "$LOG_FILE"; }
-log_difference() { echo -e "$1" | tee -a "$DIFF_LOG_FILE"; }
+log_difference() { echo -e "[DIFF] $1" | tee -a "$LOG_FILE"; }
 log_error() {
     local ts=$(date '+%Y-%m-%d %H:%M:%S')
     local domain="${2:-unknown}"
@@ -69,9 +60,9 @@ log_error() {
     local dns_ip="${4:-unknown}"
     local record_type="${5:-unknown}"
     local errmsg="$1"
-    echo -e "[$ts] Domain: $domain | DNS: $dns_name ($dns_ip) | Type: $record_type | Error: $errmsg" | tee -a "$ERROR_LOG_FILE"
+    echo -e "[ERROR] [$ts] Domain: $domain | DNS: $dns_name ($dns_ip) | Type: $record_type | Error: $errmsg" | tee -a "$LOG_FILE"
 }
-log_geoip() { [ "$ENABLE_GEOIP" = "true" ] && echo -e "$1" | tee -a "$GEOIP_LOG_FILE"; }
+log_geoip() { [ "$ENABLE_GEOIP" = "true" ] && echo -e "[GEOIP] $1" | tee -a "$LOG_FILE"; }
 
 # ====================================================
 # Dependency check
@@ -678,13 +669,7 @@ write_to_csv() {
         local rt=$(echo "$r" | cut -d'|' -f3)
         [ "$rt" != "$record_type" ] && continue
         local disp=$(echo "$r" | cut -d'|' -f7)
-        case "$rt" in
-            "A")    echo "$domain,$dns_name,$dns_ip,$disp" >> "$A_REPORT_FILE" ;;
-            "CNAME") echo "$domain,$dns_name,$dns_ip,$disp" >> "$CNAME_REPORT_FILE" ;;
-            "MX")   echo "$domain,$dns_name,$dns_ip,$disp" >> "$MX_REPORT_FILE" ;;
-            "SOA")  echo "$domain,$dns_name,$dns_ip,$disp" >> "$SOA_REPORT_FILE" ;;
-            "TXT")  echo "$domain,$dns_name,$dns_ip,$disp" >> "$TXT_REPORT_FILE" ;;
-        esac
+        echo "$domain,$dns_name,$dns_ip,$rt,$disp" >> "$RESULTS_CSV"
     done
 }
 
@@ -712,7 +697,6 @@ init_prometheus() {
     PROM_ERROR_LINES=()
     PROM_SUCCESS_LINES=()
     PROM_NODATA_LINES=()
-    PROM_INFO_LINES=()
     PROM_TIMESTAMP_LINES=()
     PROM_DOMAIN_LIST=()
     PROM_RAW_TMP=()
@@ -763,8 +747,6 @@ emit_dns_prometheus() {
         local time_val=$(echo "$r" | cut -d'|' -f5)
         local t_ms=$(echo "$time_val" | sed 's/ms//')
         local raw=$(echo "$r" | cut -d'|' -f6)
-        # Sanitize result for Prometheus label value: remove chars illegal in label values
-        local safe_result=$(echo "$raw" | sed 's/"/\\"/g; s/\\/\\\\/g; s/[{}=]//g; s/[[:cntrl:]]//g' | head -c 200)
         # Extract country_code: A record uses raw IP; CNAME extracts first IP from final node
         local country_code="N/A"
         if [ "$ENABLE_GEOIP" = "true" ]; then
@@ -784,18 +766,17 @@ emit_dns_prometheus() {
             SUCCESS)
                 PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
                 PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
-                PROM_SUCCESS_LINES+=("dns_query_success{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 1")
+                PROM_SUCCESS_LINES+=("dns_query_success{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 1")
                 PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
-                PROM_INFO_LINES+=("dns_query_result{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
                 ;;
             ERROR)
                 local err_msg=$(echo "$r" | cut -d'|' -f8 | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 100)
-                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"$err_msg\"} 1")
-                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 0")
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\",error_type=\"$err_msg\"} 1")
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
                 ;;
             NO_RECORD)
-                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} 1")
-                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 1")
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\",error_type=\"\"} 0")
                 ;;
         esac
     done
@@ -860,10 +841,6 @@ write_prometheus_final() {
         echo "# HELP dns_query_nodata DNS query no-data status (1=no record, 0=has data)"
         echo "# TYPE dns_query_nodata gauge"
         printf '%s\n' "${PROM_NODATA_LINES[@]}"
-        echo ""
-        echo "# HELP dns_query_result DNS query result value (A record IP, CNAME chain, or MX list)"
-        echo "# TYPE dns_query_result gauge"
-        printf '%s\n' "${PROM_INFO_LINES[@]}"
         echo ""
         echo "# HELP dns_query_difference DNS resolution difference vs baseline server (1=different, 0=consistent)"
         echo "# TYPE dns_query_difference gauge"
@@ -1113,28 +1090,10 @@ compare_with_snapshot() {
 }
 
 # In daemon mode, initialize output files for each round.
-# Truncates CSV/report files each round; logs are always appended.
+# Truncates CSV each round; log is always appended.
 init_daemon_output_files() {
-    # Reassign log files to fixed names for daemon mode
     LOG_FILE="dns_daemon.log"
-    DIFF_LOG_FILE="dns_differences.log"
-    ERROR_LOG_FILE="dns_errors.log"
-    SUMMARY_FILE="dns_summary.txt"
-
-    if [ "$ENABLE_GEOIP" = "true" ]; then
-        GEOIP_LOG_FILE="dns_geoip.log"
-    fi
-
-    if [ "$ENABLE_GEOIP" = "true" ]; then
-        echo "Domain,DNS Name,DNS IP,Result (IP[COUNTRY])" > "$A_REPORT_FILE"
-        echo "Domain,DNS Name,DNS IP,Result (CNAME Chain with IP[COUNTRY])" > "$CNAME_REPORT_FILE"
-    else
-        echo "Domain,DNS Name,DNS IP,Result" > "$A_REPORT_FILE"
-        echo "Domain,DNS Name,DNS IP,Result (CNAME Chain)" > "$CNAME_REPORT_FILE"
-    fi
-    echo "Domain,DNS Name,DNS IP,Result" > "$MX_REPORT_FILE"
-    echo "Domain,DNS Name,DNS IP,Result (SOA record - full line from AUTHORITY)" > "$SOA_REPORT_FILE"
-    echo "Domain,DNS Name,DNS IP,Result (TXT record)" > "$TXT_REPORT_FILE"
+    echo "domain,dns_name,dns_ip,record_type,result" > "$RESULTS_CSV"
 }
 
 # Executes one complete round of DNS comparisons across all domains
@@ -1166,25 +1125,6 @@ run_one_round() {
         echo "CNAME comparison: Chain structure only (final IP ignored)" >> "$LOG_FILE"
         echo "IP Geolocation: $ENABLE_GEOIP (display only)" >> "$LOG_FILE"
         echo "========================================" >> "$LOG_FILE"
-    fi
-
-    if [ "$DAEMON_MODE" = "true" ]; then
-        echo "DNS Difference Log - $(date)" >> "$DIFF_LOG_FILE"
-    else
-        echo "DNS Difference Log - $(date)" > "$DIFF_LOG_FILE"
-    fi
-    echo "This file records all DNS resolution discrepancies" >> "$DIFF_LOG_FILE"
-    echo "Note: For CNAME records, differences are based on chain structure" >> "$DIFF_LOG_FILE"
-    echo "========================================" >> "$DIFF_LOG_FILE"
-
-    echo "DNS Error Log - $(date)" > "$ERROR_LOG_FILE"
-    echo "This file records all DNS query errors and failures" >> "$ERROR_LOG_FILE"
-    echo "========================================" >> "$ERROR_LOG_FILE"
-
-    if [ "$ENABLE_GEOIP" = "true" ]; then
-        echo "DNS GeoIP Log - $(date)" > "$GEOIP_LOG_FILE"
-        echo "This file records ip geolocation lookups" >> "$GEOIP_LOG_FILE"
-        echo "========================================" >> "$GEOIP_LOG_FILE"
     fi
 
     # Initialize counters
@@ -1281,21 +1221,18 @@ run_one_round() {
     log "  Consistent resolutions: $((total - diff_cnt))"
 
     if [ $diff_cnt -gt 0 ]; then
-        log "\n${BOLD_YELLOW}⚠ Differences were detected in $diff_cnt domain(s)${NC}"
-        log "${BOLD_YELLOW}  Check the difference log for details: $DIFF_LOG_FILE${NC}"
+        log "\n${BOLD_YELLOW} Differences were detected in $diff_cnt domain(s)${NC}"
     fi
     if [ $no_record_cnt -gt 0 ]; then
-        log "\n${YELLOW}ℹ No records found for $no_record_cnt domain(s)${NC}"
+        log "\n No records found for $no_record_cnt domain(s)${NC}"
     fi
     if [ $err_cnt -gt 0 ]; then
-        log "\n${BOLD_RED}✗ Errors occurred in $err_cnt domain(s)${NC}"
-        log "${BOLD_RED}  Check the error log for details: $ERROR_LOG_FILE${NC}"
+        log "\n Errors occurred in $err_cnt domain(s) (see [ERROR] tags in log)${NC}"
     fi
 
     if [ "$ENABLE_GEOIP" = "true" ]; then
         log "\n${CYAN}IP Geolocation Statistics:${NC}"
         log "  Unique IPs resolved: ${#IP_COUNTRY_CACHE[@]}"
-        log "  GeoIP log: $GEOIP_LOG_FILE"
     fi
 
     log "\n${CYAN}Statistics by Category:${NC}"
@@ -1315,21 +1252,13 @@ run_one_round() {
 
     log "\n${GREEN}Output files:${NC}"
     if [ "$DAEMON_MODE" = "true" ]; then
-        log "  Daemon log: $LOG_FILE"
+        log "  Log: $LOG_FILE"
         log "  Change log: $CHANGE_LOG_FILE"
-        log "  Differences log: $DIFF_LOG_FILE"
+        log "  Results: $RESULTS_CSV"
         log "  Snapshot: $SNAPSHOT_FILE"
     else
-        log "  Detailed log: $LOG_FILE"
-        log "  ${BOLD_YELLOW}Difference log: $DIFF_LOG_FILE${NC}"
-        log "  ${BOLD_RED}Error log: $ERROR_LOG_FILE${NC}"
-        [ "$ENABLE_GEOIP" = "true" ] && log "  ${CYAN}GeoIP log: $GEOIP_LOG_FILE${NC}"
-        log "  Summary report: $SUMMARY_FILE"
-        log "  A record report: $A_REPORT_FILE"
-        log "  CNAME record report: $CNAME_REPORT_FILE"
-        log "  MX record report: $MX_REPORT_FILE"
-        log "  SOA record report: $SOA_REPORT_FILE"
-        log "  TXT record report: $TXT_REPORT_FILE"
+        log "  Log: $LOG_FILE"
+        log "  Results: $RESULTS_CSV"
     fi
 
     # Finalize snapshot for this round
@@ -1449,17 +1378,8 @@ while IFS='@' read -r name ip; do
     [ -n "$name" ] && [ -n "$ip" ] && dns_names+=("$name") && dns_ips+=("$ip")
 done <<< "$DNS_SERVERS"
 
-# Initialize CSV/report files (daemon mode's run_one_round will re-init these per round)
-if [ "$ENABLE_GEOIP" = "true" ]; then
-    echo "Domain,DNS Name,DNS IP,Result (IP[COUNTRY])" > "$A_REPORT_FILE"
-    echo "Domain,DNS Name,DNS IP,Result (CNAME Chain with IP[COUNTRY])" > "$CNAME_REPORT_FILE"
-else
-    echo "Domain,DNS Name,DNS IP,Result" > "$A_REPORT_FILE"
-    echo "Domain,DNS Name,DNS IP,Result (CNAME Chain)" > "$CNAME_REPORT_FILE"
-fi
-echo "Domain,DNS Name,DNS IP,Result" > "$MX_REPORT_FILE"
-echo "Domain,DNS Name,DNS IP,Result (SOA record - full line from AUTHORITY)" > "$SOA_REPORT_FILE"
-echo "Domain,DNS Name,DNS IP,Result (TXT record)" > "$TXT_REPORT_FILE"
+# Initialize consolidated CSV (daemon mode re-inits per round)
+echo "domain,dns_name,dns_ip,record_type,result" > "$RESULTS_CSV"
 
 log "${YELLOW}Test Configuration:${NC}"
 [ -n "$DOMAIN_FILE" ] && log "  Domain file: $DOMAIN_FILE"
