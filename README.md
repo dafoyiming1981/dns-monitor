@@ -180,23 +180,17 @@ google.com
 
 | 文件名 | 说明 |
 |--------|------|
-| `dns_test_*.log` | 完整日志，包含所有查询结果和配置信息 |
-| `dns_differences_*.log` | 差异日志，记录所有 DNS 解析差异 |
-| `dns_errors_*.log` | 错误日志，记录查询失败信息 |
-| `dns_geoip_*.log` | GeoIP 日志（启用时） |
-| `dns_summary_*.txt` | 汇总报告，记录每个域名的一致性状态 |
-| `dns_a_report_*.csv` | A 记录 CSV 报告 |
-| `dns_cname_report_*.csv` | CNAME 记录 CSV 报告 |
-| `dns_mx_report_*.csv` | MX 记录 CSV 报告 |
-| `dns_soa_report_*.csv` | SOA 记录 CSV 报告 |
-| `dns_txt_report_*.csv` | TXT 记录 CSV 报告（含 SPF/DMARC/DKIM/OTHER 分类） |
+| `dns_run.log` | 完整运行日志，包含所有查询结果、差异（`[DIFF]` 标签）、错误（`[ERROR]` 标签）和 GeoIP 信息（`[GEOIP]` 标签） |
+| `dns_results.csv` | 合并 CSV 报告，包含所有记录类型（A/CNAME/MX/SOA/TXT），列：`domain,dns_name,dns_ip,record_type,result` |
 
 ### Prometheus 输出文件（启用 --prom-dir 时）
 
 | 文件名 | 说明 |
 |--------|------|
-| `dns_compare.prom` | 查询指标（延迟、错误、无记录、差异、解析结果值） |
+| `dns_compare.prom` | 查询指标（延迟、错误、无记录、差异、变化检测、MX 稳定性） |
 | `dns_summary.prom` | 汇总指标（总数、差异数、错误数、时间戳） |
+
+> v8.0 已将原先的 12 个分离日志/CSV 文件合并为 2 个文件，大幅减少磁盘占用。`dns_query_result` 指标已移除（其高基数 label 值会导致 .prom 文件膨胀到 24MB+），解析结果请查看 CSV 和日志文件。
 
 ---
 
@@ -206,10 +200,12 @@ google.com
 
 | 指标名 | 类型 | 标签 | 说明 |
 |--------|------|------|------|
-| `dns_query_duration_ms` | gauge | domain, server, record_type, result, duration_ms, country_code | 值为 1，A 记录时 country_code 为 IP 所属国家代码，其他记录类型时为 N/A |
-| `dns_query_error` | gauge | domain, server, record_type, result, duration_ms, country_code | 查询错误（1=失败, 0=正常），失败时 result="ERROR" |
-| `dns_query_nodata` | gauge | domain, server, record_type, result, duration_ms, country_code | 无数据（1=无记录, 0=有数据），无记录时 result="NO_RECORD" |
-| `dns_query_difference` | gauge | domain, server, record_type | 与基线差异（1=不一致, 0=一致） |
+| `dns_query_duration_ms` | gauge | domain, server, record_type, category, country_code | 查询延迟（毫秒），A/CNAME 记录时 country_code 为 IP 所属国家代码，其他记录类型时为 N/A |
+| `dns_query_error` | gauge | domain, server, record_type, category, country_code, error_type | 查询错误（1=失败, 0=正常），失败时 error_type 为错误信息 |
+| `dns_query_success` | gauge | domain, server, record_type, category, country_code | 查询成功状态（1=成功, 0=失败） |
+| `dns_query_nodata` | gauge | domain, server, record_type, category, country_code | 无数据（1=无记录, 0=有数据） |
+| `dns_query_difference` | gauge | domain, server, record_type, category | 与基线差异（1=不一致, 0=一致） |
+| `dns_query_last_test_timestamp` | gauge | domain, server, record_type, category | 该域名/服务器/记录类型的上次测试时间戳 |
 | `dns_test_domains_total` | gauge | 无 | 本次测试域名总数 |
 | `dns_test_differences_total` | gauge | 无 | 有差异的域名数 |
 | `dns_test_errors_total` | gauge | 无 | 有错误的域名数 |
@@ -262,21 +258,29 @@ node_exporter --collector.textfile.directory=/run/textfile_collector/
 ### 6.5 Grafana 查询示例
 
 ```promql
-# Grafana Table 视图：使用 dns_query_duration_ms 作为数据源
-# 显示列：domain, server, record_type, result, duration_ms（全部为标签）
+# 查询某域名的所有解析延迟
 dns_query_duration_ms{domain="example.com"}
 
 # 查看查询错误
-dns_query_error{result="ERROR"} == 1
+dns_query_error{error_type!=""} == 1
+
+# 查看查询失败的具体错误类型
+dns_query_error{domain="example.com"} == 1
 
 # 差异检测（任何不一致的 DNS 服务器）
-dns_query_difference{server!=""} == 1
+dns_query_difference == 1
+
+# 无记录检测
+dns_query_nodata == 1
 
 # 变化检测（daemon 模式）
 dns_change_detected{change_type="change"}
 
 # 测试运行时间间隔
 time() - dns_test_last_run_timestamp
+
+# MX 稳定性成功率
+dns_mx_stability{result_type="success_pct"}
 ```
 
 ---
@@ -359,9 +363,16 @@ cat /run/textfile_collector/dns_compare.prom
 
 ```bash
 # 访问 node_exporter 的 metrics 端点
-curl http://localhost:9100/metrics | grep dns_query
+curl http://localhost:9100/metrics | grep dns_
 
-# 应该能看到 dns_query_* 指标
+# 应该能看到以下指标：
+# dns_query_duration_ms    - 查询延迟
+# dns_query_error          - 查询错误
+# dns_query_success        - 查询成功
+# dns_query_nodata         - 无记录
+# dns_query_difference     - 解析差异
+# dns_test_domains_total   - 测试域名总数
+# dns_changes_total        - 变化检测统计
 ```
 
 ---
@@ -387,11 +398,10 @@ curl http://localhost:9100/metrics | grep dns_query
 
 | 文件 | 说明 |
 |------|------|
-| `dns_latest_snapshot.json` | 当前 DNS 状态快照 |
-| `dns_changes.log` | 累积变化日志（只追加） |
-| `dns_differences.log` | 累积差异日志（只追加） |
-| `dns_a_report.csv` | 最新一轮 A 记录报告 |
-| `dns_daemon.log` | 主守护进程日志 |
+| `dns_daemon.log` | 主守护进程日志（包含所有查询、差异 `[DIFF]`、错误 `[ERROR]`） |
+| `dns_changes.log` | 累积变化日志（只追加，记录值变化/新增/消失/错误） |
+| `dns_results.csv` | 最新一轮解析结果 CSV（每轮覆盖） |
+| `dns_latest_snapshot.json` | 当前 DNS 状态快照（用于变化检测对比） |
 
 ### systemd 服务
 
@@ -420,9 +430,9 @@ systemctl status dns-compare
 # 每 5 分钟执行一次
 */5 * * * * root /usr/local/bin/dns-compare/dns_compare.sh -f /etc/dns_compare/domains.yaml --prom-dir /run/textfile_collector/ --no-geoip >> /var/log/dns_compare.log 2>&1
 
-# 每 30 分钟清理 7 天前的旧日志
-*/30 * * * * root find /var/log/ -name "dns_test_*.log" -mtime +7 -delete 2>/dev/null
+# 每 30 分钟清理 7 天前的旧日志和临时 prom 文件
 */30 * * * * root find /var/log/ -name "dns_*.log" -mtime +7 -delete 2>/dev/null
+*/30 * * * * root find /run/textfile_collector/ -name ".dns_domain_*.tmp" -mmin +10 -delete 2>/dev/null
 ```
 
 ### 9.2 启用 crontab
@@ -443,7 +453,9 @@ ls -la /etc/cron.d/
 
 ### 10.1 日志管理
 
-日志文件按时间戳命名，定期增长。建议：
+单次运行模式：输出到 `dns_run.log` 和 `dns_results.csv`（固定文件名，每轮覆盖）。
+
+守护进程模式：输出到 `dns_daemon.log`（追加）和 `dns_changes.log`（追加），文件会持续增长。建议：
 
 - 配置 logrotate 自动轮转
 - 使用 crontab 定时清理 7 天以上旧日志（见上文）
@@ -476,14 +488,22 @@ ls -la /usr/local/bin/dns-compare/dns_compare.sh
 # 2. 手动执行查看输出
 /usr/local/bin/dns-compare/dns_compare.sh -f /etc/dns_compare/domains.yaml --no-geoip
 
-# 3. 检查 prom 文件
-ls -la /run/textfile_collector/dns_*.prom
+# 3. 检查输出文件
+ls -la dns_run.log dns_results.csv
 
-# 4. 检查 cron 日志
+# 4. 检查 prom 文件
+ls -la /run/textfile_collector/dns_*.prom
+cat /run/textfile_collector/dns_compare.prom
+
+# 5. 检查 cron 日志
 grep dns_compare /var/log/cron
 
-# 5. 检查 node_exporter 是否采集
-curl -s http://localhost:9100/metrics | grep dns_query_difference
+# 6. 检查 node_exporter 是否采集
+curl -s http://localhost:9100/metrics | grep dns_
+
+# 7. 查看差异和错误
+grep '\[DIFF\]' dns_run.log | tail -20
+grep '\[ERROR\]' dns_run.log | tail -20
 ```
 
 ### 10.5 常见问题
