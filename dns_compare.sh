@@ -67,6 +67,15 @@ log_error() {
 log_geoip() { [ "$ENABLE_GEOIP" = "true" ] && echo -e "[GEOIP] $1" | tee -a "$LOG_FILE"; }
 
 # ====================================================
+# Prometheus label value escaping
+# Per Prometheus text exposition format, label values must escape:
+#   \ -> \\   " -> \"   newline -> \n
+# ====================================================
+prom_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/ /g' | tr '\n\r' '  ' | head -c 200
+}
+
+# ====================================================
 # Dependency check
 # ====================================================
 
@@ -720,6 +729,10 @@ emit_dns_prometheus() {
     [ -z "$PROM_METRICS_FILE" ] && return
     [ -z "$category" ] && category="default"
 
+    # Escape label values once at the top — reused in all metric lines below
+    local esc_domain=$(prom_escape "$domain")
+    local esc_category=$(prom_escape "$category")
+
     # Store all results per domain for baseline comparison at final write time
     local tmp_file=$(mktemp "${PROMETHEUS_TEXTFILE_DIR}/.dns_domain_XXXXXX")
     for r in "${results[@]}"; do
@@ -737,13 +750,15 @@ emit_dns_prometheus() {
         local dns_name=$(echo "$r" | cut -d'|' -f1)
         local rt=$(echo "$r" | cut -d'|' -f3)
         local now_ts=$(date '+%s')
-        PROM_TIMESTAMP_LINES+=("dns_query_last_test_timestamp{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\"} $now_ts")
+        PROM_TIMESTAMP_LINES+=("dns_query_last_test_timestamp{domain=\"$esc_domain\",server=\"$(prom_escape "$dns_name")\",record_type=\"$(prom_escape "$rt")\",category=\"$esc_category\"} $now_ts")
     done
 
     for r in "${results[@]}"; do
         local dns_name=$(echo "$r" | cut -d'|' -f1)
         local dns_ip=$(echo "$r" | cut -d'|' -f2)
         local rt=$(echo "$r" | cut -d'|' -f3)
+        local esc_server=$(prom_escape "$dns_name")
+        local esc_rt=$(prom_escape "$rt")
 
         local status=$(echo "$r" | cut -d'|' -f4)
         local time_val=$(echo "$r" | cut -d'|' -f5)
@@ -766,19 +781,19 @@ emit_dns_prometheus() {
         fi
         case "$status" in
             SUCCESS)
-                PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} $t_ms")
-                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",error_type=\"\"} 0")
-                PROM_SUCCESS_LINES+=("dns_query_success{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 1")
-                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
+                PROM_DURATION_LINES+=("dns_query_duration_ms{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} $t_ms")
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",error_type=\"\"} 0")
+                PROM_SUCCESS_LINES+=("dns_query_success{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 1")
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 0")
                 ;;
             ERROR)
-                local err_msg=$(echo "$r" | cut -d'|' -f8 | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 100)
-                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\",error_type=\"$err_msg\"} 1")
-                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 0")
+                local err_msg=$(prom_escape "$(echo "$r" | cut -d'|' -f8)")
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\",error_type=\"$err_msg\"} 1")
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 0")
                 ;;
             NO_RECORD)
-                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\"} 1")
-                PROM_ERROR_LINES+=("dns_query_error{domain=\"$domain\",server=\"$dns_name\",record_type=\"$rt\",category=\"$category\",country_code=\"$country_code\",error_type=\"\"} 0")
+                PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 1")
+                PROM_ERROR_LINES+=("dns_query_error{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\",error_type=\"\"} 0")
                 ;;
         esac
     done
@@ -816,12 +831,16 @@ write_prometheus_final() {
 
         # First server is baseline
         baseline_value="${srv_values[0]}"
+        local esc_domain=$(prom_escape "$domain")
+        local esc_rt=$(prom_escape "$record_type")
+        local esc_cat=$(prom_escape "$category")
 
         for ((j=0; j<${#srv_names[@]}; j++)); do
+            local esc_srv=$(prom_escape "${srv_names[$j]}")
             if [ "${srv_values[$j]}" = "$baseline_value" ]; then
-                diff_lines+=("dns_query_difference{domain=\"$domain\",server=\"${srv_names[$j]}\",record_type=\"$record_type\",category=\"$category\"} 0")
+                diff_lines+=("dns_query_difference{domain=\"$esc_domain\",server=\"$esc_srv\",record_type=\"$esc_rt\",category=\"$esc_cat\"} 0")
             else
-                diff_lines+=("dns_query_difference{domain=\"$domain\",server=\"${srv_names[$j]}\",record_type=\"$record_type\",category=\"$category\"} 1")
+                diff_lines+=("dns_query_difference{domain=\"$esc_domain\",server=\"$esc_srv\",record_type=\"$esc_rt\",category=\"$esc_cat\"} 1")
             fi
         done
     done
@@ -1083,8 +1102,12 @@ compare_with_snapshot() {
 
     # Emit Prometheus change detection metrics
     if [ -n "$PROM_METRICS_FILE" ]; then
-        local safe_desc=$(echo "$change_desc" | sed 's/"/\\"/g; s/	/ /g' | tr -d '\n\r' | head -c 200)
-        PROM_CHANGE_LINES+=("dns_change_detected{domain=\"$domain\",server=\"$dns_server\",record_type=\"$record_type\",change_type=\"$change_type\",description=\"$safe_desc\"} 1")
+        local esc_domain=$(prom_escape "$domain")
+        local esc_server=$(prom_escape "$dns_server")
+        local esc_rt=$(prom_escape "$record_type")
+        local esc_ct=$(prom_escape "$change_type")
+        local safe_desc=$(prom_escape "$change_desc")
+        PROM_CHANGE_LINES+=("dns_change_detected{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",change_type=\"$esc_ct\",description=\"$safe_desc\"} 1")
         case "$change_type" in
             CHANGE) PROM_CHANGE_COUNT_CHANGE=$(( ${PROM_CHANGE_COUNT_CHANGE:-0} + 1 )) ;;
             NEW)    PROM_CHANGE_COUNT_NEW=$(( ${PROM_CHANGE_COUNT_NEW:-0} + 1 )) ;;
@@ -1571,15 +1594,17 @@ run_stability_test() {
 
     # Emit Prometheus MX stability metrics
     if [ -n "$PROM_METRICS_FILE" ]; then
+        local esc_domain=$(prom_escape "$domain")
         for ((s=0; s<${#dns_names[@]}; s++)); do
             local name="${dns_names[$s]}"
-            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"mx_ok\"} ${srv_mx_ok[$s]}")
-            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"no_mx\"} ${srv_no_mx[$s]}")
-            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"servfail\"} ${srv_servfail[$s]}")
-            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"empty\"} ${srv_empty[$s]}")
-            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"other\"} ${srv_other[$s]}")
-            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"success_pct\"} $ok_pct")
-            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$domain\",server=\"$name\",result_type=\"total_queries\"} ${srv_total[$s]}")
+            local esc_server=$(prom_escape "$name")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$esc_domain\",server=\"$esc_server\",result_type=\"mx_ok\"} ${srv_mx_ok[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$esc_domain\",server=\"$esc_server\",result_type=\"no_mx\"} ${srv_no_mx[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$esc_domain\",server=\"$esc_server\",result_type=\"servfail\"} ${srv_servfail[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$esc_domain\",server=\"$esc_server\",result_type=\"empty\"} ${srv_empty[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$esc_domain\",server=\"$esc_server\",result_type=\"other\"} ${srv_other[$s]}")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$esc_domain\",server=\"$esc_server\",result_type=\"success_pct\"} $ok_pct")
+            PROM_MX_STABILITY_LINES+=("dns_mx_stability{domain=\"$esc_domain\",server=\"$esc_server\",result_type=\"total_queries\"} ${srv_total[$s]}")
         done
     fi
 
