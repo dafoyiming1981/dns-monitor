@@ -13,6 +13,7 @@ DEFAULT_DOMAIN_FILE="domains.txt"
 QUERY_DELAY=2
 DOMAIN_DELAY=3
 QUERY_RETRIES=2
+PARALLEL_QUERIES=1
 QUERY_TIMEOUT=5
 MAX_CNAME_DEPTH=10
 ENABLE_GEOIP=true
@@ -939,6 +940,8 @@ Options:
   --geoip-db FILE          Specify local GeoIP CSV database file
   --delay SECONDS          Set delay between queries (default: $QUERY_DELAY)
   --domain-delay SECONDS   Set delay between domains (default: $DOMAIN_DELAY)
+  --parallel               Run DNS queries for each domain in parallel (default)
+  --no-parallel            Force sequential queries (old behavior)
   --prom-dir DIR           Enable Prometheus textfile collector output directory
   --stability-test COUNT   Run MX stability test: query each DNS server COUNT times and show result distribution
   --mx-stability N         Daemon mode: per-round lightweight MX stability check (N queries per MX domain)
@@ -969,6 +972,7 @@ EOF
 
 daemon_cleanup() {
     log "${YELLOW}Daemon mode: shutting down gracefully...${NC}"
+    kill 0 2>/dev/null
     DAEMON_RUNNING=false
 }
 
@@ -1141,6 +1145,15 @@ run_one_round() {
     PROM_CHANGE_LINES=()
     PROM_MX_STABILITY_LINES=()
 
+    # Create shared temp directory for parallel queries in this round
+    PARALLEL_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/dns_compare.XXXXXX")
+
+    # Decide parallel vs sequential for this round
+    local use_parallel=0
+    if [ "$PARALLEL_QUERIES" -eq 1 ] && [ "$VERBOSE" -eq 0 ]; then
+        use_parallel=1
+    fi
+
     # Main domain iteration loop
     for ((didx=0; didx<${#DOMAIN_ORDER[@]}; didx++)); do
         domain="${DOMAIN_ORDER[$didx]}"
@@ -1151,34 +1164,77 @@ run_one_round() {
         results=()
         has_err=0
         has_no=0
-        for i in "${!dns_names[@]}"; do
-            name="${dns_names[$i]}"
-            ip="${dns_ips[$i]}"
-            [ $VERBOSE -eq 1 ] && log -n "  Querying $name... "
-            res=$(resolve_domain "$domain" "$ip" "$name" "$type")
-            [ $VERBOSE -eq 1 ] && log "done"
-            [[ "$res" == *"ERROR"* ]] && has_err=1
-            [[ "$res" == *"NO_RECORD"* ]] && has_no=1
-            results+=("$res")
 
-            # Daemon mode: save to snapshot and detect changes
-            if [ "$DAEMON_MODE" = "true" ]; then
-                local status=$(echo "$res" | cut -d'|' -f4)
-                local raw=$(echo "$res" | cut -d'|' -f6)
-                save_snapshot_record "${domain}@${type}@${name}" "$raw"
-                compare_with_snapshot "$domain" "$type" "$name" "$status" "$raw"
-            fi
+        if [ $use_parallel -eq 1 ]; then
+            # ---- Parallel query launch ----
+            local pdir="${PARALLEL_TMPDIR}/domain_${didx}_$$"
+            mkdir -p "$pdir"
 
-            if [ $i -lt $((${#dns_names[@]} - 1)) ]; then
-                if [ $VERBOSE -eq 1 ]; then
-                    wait_with_countdown $QUERY_DELAY "Query delay"
+            # Launch all DNS queries in background
+            for i in "${!dns_names[@]}"; do
+                (
+                    resolve_domain "$domain" "${dns_ips[$i]}" "${dns_names[$i]}" "$type" > "$pdir/$i"
+                ) &
+            done
+
+            # Wait for all background jobs to complete
+            wait
+
+            # Collect results in order
+            for i in "${!dns_names[@]}"; do
+                local res=""
+                if [ -f "$pdir/$i" ] && [ -s "$pdir/$i" ]; then
+                    res=$(cat "$pdir/$i")
                 else
-                    echo -ne "${YELLOW}  Wait ${QUERY_DELAY}s...${NC}\r"
-                    sleep $QUERY_DELAY
-                    echo -e "${GREEN}  Done${NC}"
+                    res="${dns_names[$i]}|${dns_ips[$i]}|${type}|ERROR|N/A|N/A|N/A|Background job produced no output"
+                    log_error "Background job produced empty output for ${dns_names[$i]}" "$domain" "${dns_names[$i]}" "${dns_ips[$i]}" "$type"
                 fi
-            fi
-        done
+                [[ "$res" == *"ERROR"* ]] && has_err=1
+                [[ "$res" == *"NO_RECORD"* ]] && has_no=1
+                results+=("$res")
+
+                # Daemon mode: save to snapshot and detect changes
+                if [ "$DAEMON_MODE" = "true" ]; then
+                    local status=$(echo "$res" | cut -d'|' -f4)
+                    local raw=$(echo "$res" | cut -d'|' -f6)
+                    save_snapshot_record "${domain}@${type}@${dns_names[$i]}" "$raw"
+                    compare_with_snapshot "$domain" "$type" "${dns_names[$i]}" "$status" "$raw"
+                fi
+            done
+
+            rm -rf "$pdir"
+
+        else
+            # ---- Sequential query launch (original) ----
+            for i in "${!dns_names[@]}"; do
+                name="${dns_names[$i]}"
+                ip="${dns_ips[$i]}"
+                [ $VERBOSE -eq 1 ] && log -n "  Querying $name... "
+                res=$(resolve_domain "$domain" "$ip" "$name" "$type")
+                [ $VERBOSE -eq 1 ] && log "done"
+                [[ "$res" == *"ERROR"* ]] && has_err=1
+                [[ "$res" == *"NO_RECORD"* ]] && has_no=1
+                results+=("$res")
+
+                # Daemon mode: save to snapshot and detect changes
+                if [ "$DAEMON_MODE" = "true" ]; then
+                    local status=$(echo "$res" | cut -d'|' -f4)
+                    local raw=$(echo "$res" | cut -d'|' -f6)
+                    save_snapshot_record "${domain}@${type}@${name}" "$raw"
+                    compare_with_snapshot "$domain" "$type" "$name" "$status" "$raw"
+                fi
+
+                if [ $i -lt $((${#dns_names[@]} - 1)) ]; then
+                    if [ $VERBOSE -eq 1 ]; then
+                        wait_with_countdown $QUERY_DELAY "Query delay"
+                    else
+                        echo -ne "${YELLOW}  Wait ${QUERY_DELAY}s...${NC}\r"
+                        sleep $QUERY_DELAY
+                        echo -e "${GREEN}  Done${NC}"
+                    fi
+                fi
+            done
+        fi
         display_results "$domain" "$type" "$cat" "${results[@]}"
         diff=$?
         [ $diff -eq 1 ] && ((diff_cnt++))
@@ -1270,6 +1326,9 @@ run_one_round() {
         fi
     fi
 
+    # Clean up any remaining parallel temp files
+    rm -rf "$PARALLEL_TMPDIR"
+
     # Write Prometheus summary metrics
     run_ts=$(date +%s)
     write_prometheus_final "$total" "$diff_cnt" "$err_cnt" "$no_record_cnt" "$run_ts"
@@ -1319,6 +1378,8 @@ while [[ $# -gt 0 ]]; do
         --geoip-db) LOCAL_GEOIP_CSV="$2"; shift 2 ;;
         --delay) QUERY_DELAY="$2"; shift 2 ;;
         --domain-delay) DOMAIN_DELAY="$2"; shift 2 ;;
+        --parallel)      PARALLEL_QUERIES=1; shift ;;
+        --no-parallel)   PARALLEL_QUERIES=0; shift ;;
         --prom-dir) PROMETHEUS_TEXTFILE_DIR="$2"; shift 2 ;;
         --daemon) DAEMON_MODE=true; shift ;;
         --interval) DAEMON_INTERVAL="$2"; shift 2 ;;
