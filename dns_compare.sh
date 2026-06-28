@@ -1656,17 +1656,18 @@ if [ "$DAEMON_MODE" = "false" ]; then
 
 # ---- Daemon mode ----
 else
-    # Pre-flight check: detect duplicate domain+type+category combinations
+    # Pre-flight check: detect duplicate domain+type combinations
+    # Same domain+type with different categories still causes duplicate prom metrics
     dupes=""
     for ((dd=0; dd<${#DOMAIN_ORDER[@]}; dd++)); do
-        echo "${DOMAIN_ORDER[$dd]}|${DOMAIN_CONFIG_ARR[$dd]}|${DOMAIN_CATEGORY_ARR[$dd]}"
+        echo "${DOMAIN_ORDER[$dd]}|${DOMAIN_CONFIG_ARR[$dd]}"
     done | sort | uniq -d > /tmp/_dns_dupes_check
     dupes=$(cat /tmp/_dns_dupes_check 2>/dev/null)
     rm -f /tmp/_dns_dupes_check
     if [ -n "$dupes" ]; then
         log "${RED}ERROR: Duplicate domain entries detected in domain file:${NC}"
-        echo "$dupes" | while IFS='|' read -r d t c; do
-            log "${RED}  - $d ($t) [category: $c]${NC}"
+        echo "$dupes" | while IFS='|' read -r d t; do
+            log "${RED}  - $d ($t) — appears more than once${NC}"
         done
         log "${RED}Aborting daemon startup. Remove duplicates from your domain file before starting.${NC}"
         exit 1
