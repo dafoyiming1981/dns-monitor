@@ -708,6 +708,7 @@ init_prometheus() {
     PROM_ERROR_LINES=()
     PROM_SUCCESS_LINES=()
     PROM_NODATA_LINES=()
+    PROM_RESULT_LINES=()
     PROM_TIMESTAMP_LINES=()
     PROM_DOMAIN_LIST=()
     PROM_RAW_TMP=()
@@ -785,6 +786,8 @@ emit_dns_prometheus() {
                 PROM_ERROR_LINES+=("dns_query_error{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",error_type=\"\"} 0")
                 PROM_SUCCESS_LINES+=("dns_query_success{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 1")
                 PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 0")
+                local safe_result=$(prom_escape "$raw")
+                PROM_RESULT_LINES+=("dns_query_result{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
                 ;;
             ERROR)
                 local err_msg=$(prom_escape "$(echo "$r" | cut -d'|' -f8)")
@@ -862,6 +865,10 @@ write_prometheus_final() {
         echo "# HELP dns_query_nodata DNS query no-data status (1=no record, 0=has data)"
         echo "# TYPE dns_query_nodata gauge"
         printf '%s\n' "${PROM_NODATA_LINES[@]}"
+        echo ""
+        echo "# HELP dns_query_result DNS query result value (A record IP, CNAME chain, or MX list)"
+        echo "# TYPE dns_query_result gauge"
+        printf '%s\n' "${PROM_RESULT_LINES[@]}"
         echo ""
         echo "# HELP dns_query_difference DNS resolution difference vs baseline server (1=different, 0=consistent)"
         echo "# TYPE dns_query_difference gauge"
@@ -1171,6 +1178,7 @@ run_one_round() {
     PROM_ERROR_LINES=()
     PROM_SUCCESS_LINES=()
     PROM_NODATA_LINES=()
+    PROM_RESULT_LINES=()
     PROM_TIMESTAMP_LINES=()
     # Clean up old temp files from previous round
     for old_tmp in "${PROM_RAW_TMP[@]}"; do
