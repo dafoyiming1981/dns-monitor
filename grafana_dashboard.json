@@ -847,7 +847,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "dns_query_duration_ms{domain=~\"$domain\", server=~\"$server\", category=~\"$category\"}",
+          "expr": "dns_query_result{domain=~\"$domain\", server=~\"$server\", category=~\"$category\"}",
           "format": "table",
           "instant": true,
           "refId": "A"
