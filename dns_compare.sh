@@ -31,8 +31,8 @@ PROMETHEUS_TEXTFILE_DIR="/run/textfile_collector"
 # ----------------------------------------------------
 
 DNS_SERVERS="
-SHG@10.143.10.5
-BJV@10.144.10.5
+SHG@2.2.2.2
+BJV@3.3.3.3
 114@114.114.114.114
 Ali@223.5.5.5
 Cloudflare@1.1.1.1
