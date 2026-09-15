@@ -14,11 +14,11 @@ domains:
     type: A
     category: bank_core
 
-  - domain: morganstanley.com
+  - domain: example.com
     type: MX
     category: mail_ms
 
-  - domain: ica.mydesk.morganstanley.com
+  - domain: ica.mydesk.example.com
     type: CNAME
     category: cdn_ica
 

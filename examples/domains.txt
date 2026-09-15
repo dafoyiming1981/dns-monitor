@@ -3,10 +3,10 @@ b2enew.bankofchina.com
 api.bankofchina.com
 
 [mail_ms:MX]
-morganstanley.com
+example.com
 
 [cdn_ica:CNAME]
-ica.mydesk.morganstanley.com
+ica.mydesk.example.com
 
 [txt_spf:TXT]
 google.com

@@ -1,8 +1,8 @@
 {
   "domains": [
     {"domain": "b2enew.bankofchina.com", "type": "A", "category": "bank_core"},
-    {"domain": "morganstanley.com", "type": "MX", "category": "mail_ms"},
-    {"domain": "ica.mydesk.morganstanley.com", "type": "CNAME", "category": "cdn_ica"},
+    {"domain": "example.com", "type": "MX", "category": "mail_ms"},
+    {"domain": "ica.mydesk.example.com", "type": "CNAME", "category": "cdn_ica"},
     {"domain": "google.com", "type": "TXT", "category": "txt_spf"}
   ]
 }

@@ -62,10 +62,10 @@ v8.2 起 TLD 服务器不再参与常规对比，改为独立的 **TLD Trace 检
 ./dns_compare.sh -d example.com -t A
 
 # 测试 CNAME 记录
-./dns_compare.sh -d ica.mydesk.morganstanley.com -t CNAME
+./dns_compare.sh -d ica.mydesk.example.com -t CNAME
 
 # 测试 MX 记录
-./dns_compare.sh -d morganstanley.com -t MX
+./dns_compare.sh -d example.com -t MX
 
 # 测试 TXT 记录
 ./dns_compare.sh -d google.com -t TXT
@@ -122,11 +122,11 @@ domains:
     type: A
     category: bank_core
 
-  - domain: morganstanley.com
+  - domain: example.com
     type: MX
     category: mail_ms
 
-  - domain: ica.mydesk.morganstanley.com
+  - domain: ica.mydesk.example.com
     type: CNAME
     category: cdn_ica
 
@@ -143,7 +143,7 @@ domains:
 ### 自定义 DNS 服务器示例
 
 ```yaml
-  - domain: morganstanley.com
+  - domain: example.com
     type: MX
     category: mail_ms
     stability_dns_servers:
@@ -152,7 +152,7 @@ domains:
       - "InternalDNS@10.0.0.1"
 ```
 
-仅对 `morganstanley.com` 的 MX 稳定性测试使用这三个 DNS 服务器，正常比较仍用全局列表。
+仅对 `example.com` 的 MX 稳定性测试使用这三个 DNS 服务器，正常比较仍用全局列表。
 
 ### 4.2 JSON 格式
 
@@ -160,7 +160,7 @@ domains:
 {
   "domains": [
     {"domain": "b2enew.bankofchina.com", "type": "A", "category": "bank_core"},
-    {"domain": "morganstanley.com", "type": "MX", "category": "mail_ms"},
+    {"domain": "example.com", "type": "MX", "category": "mail_ms"},
     {"domain": "google.com", "type": "TXT", "category": "txt_spf"}
   ]
 }
@@ -174,10 +174,10 @@ b2enew.bankofchina.com
 api.bankofchina.com
 
 [mail_ms:MX]
-morganstanley.com
+example.com
 
 [cdn_ica:CNAME]
-ica.mydesk.morganstanley.com
+ica.mydesk.example.com
 
 [txt_spf:TXT]
 google.com
