@@ -2211,288 +2211,6 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 112
-      },
-      "id": 60402,
-      "title": "Success Rate Comparison",
-      "type": "row",
-      "panels": [],
-      "datasource": {}
-    },
-    {
-      "id": 60403,
-      "title": "Per-Server Success Rate",
-      "type": "bargauge",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 113
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "avg(dns_query_success{category=~\"$category\"}) by (server) * 100",
-          "format": "table",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": 0
-              },
-              {
-                "color": "orange",
-                "value": 80
-              },
-              {
-                "color": "yellow",
-                "value": 90
-              },
-              {
-                "color": "green",
-                "value": 95
-              }
-            ]
-          },
-          "min": 0,
-          "max": 100,
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "options": {
-        "displayMode": "gradient",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showUnfilled": true
-      }
-    },
-    {
-      "id": 60404,
-      "title": "Success Rate Over Time",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 113
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "avg(dns_query_success{category=~\"$category\"}) * 100",
-          "format": "time_series",
-          "legendFormat": "Overall",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "avg(dns_query_success{category=~\"$category\"}) by (server) * 100",
-          "format": "time_series",
-          "legendFormat": "{{server}}",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": 0
-              },
-              {
-                "color": "green",
-                "value": 95
-              }
-            ]
-          },
-          "min": 0,
-          "max": 100,
-          "unit": "percent",
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "spanNulls": false,
-            "showPoints": "auto"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "showLegend": true,
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      }
-    },
-    {
-      "id": 60405,
-      "title": "Success Rate by Server & Record Type",
-      "type": "table",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 121
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "avg(dns_query_success{category=~\"$category\"}) by (server, record_type) * 100",
-          "format": "table",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true,
-              "Value": true
-            },
-            "renameByName": {
-              "server": "DNS Server",
-              "record_type": "Record Type",
-              "Value": "Success Rate (%)"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": {},
-            "sort": [
-              {
-                "desc": true,
-                "field": "Success Rate (%)"
-              }
-            ]
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": 0
-              },
-              {
-                "color": "orange",
-                "value": 80
-              },
-              {
-                "color": "yellow",
-                "value": 90
-              },
-              {
-                "color": "green",
-                "value": 95
-              }
-            ]
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "DNS Server"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 120
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Record Type"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "cellHeight": "sm"
-      }
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
         "y": 129
       },
       "id": 2000,
@@ -2535,19 +2253,12 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "TXT Value"
+              "options": "TXT Count"
             },
             "properties": [
               {
                 "id": "custom.width",
-                "value": 500
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "basic",
-                  "mode": "gradient"
-                }
+                "value": 120
               }
             ]
           },
@@ -2622,13 +2333,13 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "dns_query_success{record_type=\"TXT\", domain=~\"$domain\", server=~\"$server\", category=~\"$category\"}",
+          "expr": "dns_query_result{record_type=\"TXT\", domain=~\"$domain\", server=~\"$server\", category=~\"$category\"}",
           "format": "table",
           "instant": true,
           "refId": "A"
         }
       ],
-      "title": "TXT Record Content",
+      "title": "TXT Record Count & SPF",
       "transformations": [
         {
           "id": "organize",
@@ -2639,19 +2350,216 @@
               "Value": true,
               "country_code": true,
               "instance": true,
-              "job": true
+              "job": true,
+              "has_spf": false,
+              "result": false
             },
             "renameByName": {
               "domain": "Domain",
               "server": "DNS Server",
               "category": "Category",
               "record_type": "Type",
-              "result": "TXT Value"
+              "result": "TXT Count",
+              "has_spf": "SPF Present"
             }
           }
         }
       ],
-      "type": "table"
+      "type": "table",
+      "description": "TXT record count and SPF presence per DNS server (v8.1+: full content no longer compared)"
+    },
+    {
+      "id": 3000,
+      "type": "row",
+      "title": "TLD Trace (Reference Only)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 142
+      },
+      "panels": []
+    },
+    {
+      "id": 3001,
+      "type": "stat",
+      "title": "Trace Errors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "count(dns_trace_error == 1) or vector(0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 143
+      }
+    },
+    {
+      "id": 3002,
+      "type": "timeseries",
+      "title": "Trace Duration (ms)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "dns_trace_duration_ms{domain=~\"$domain\", category=~\"$category\"}",
+          "refId": "A",
+          "legendFormat": "{{domain}} ({{record_type}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1
+          },
+          "unit": "ms",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 4,
+        "y": 143
+      }
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "dns_trace_result{domain=~\"$domain\", category=~\"$category\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "Value": true,
+              "instance": true,
+              "job": true
+            },
+            "renameByName": {
+              "domain": "Domain",
+              "record_type": "Type",
+              "category": "Category",
+              "result": "Trace Result (authoritative)"
+            },
+            "indexByName": {}
+          }
+        }
+      ],
+      "id": 3003,
+      "type": "table",
+      "title": "TLD Trace Results",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 143
+      }
     }
   ],
   "schemaVersion": 39,
