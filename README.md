@@ -1,4 +1,4 @@
-# DNS 多服务器对比测试工具 (Multi-DNS Comparison Test v8.0)
+# DNS 多服务器对比测试工具 (Multi-DNS Comparison Test v8.2)
 
 ## 目录
 
@@ -21,8 +21,9 @@
 本脚本用于同时对多个 DNS 服务器进行域名解析查询，对比返回结果是否一致。主要功能：
 
 - **多 DNS 并行对比** — 同时对 5 个 DNS 服务器（114、阿里、Google、腾讯、Cloudflare）发起查询
-- **多记录类型支持** — A、CNAME、MX、SOA、TXT 记录（TXT 自动分类：SPF/DMARC/DKIM/OTHER）
-- **差异检测** — 以第一台 DNS 为基线，逐一对比其他 DNS 的返回结果
+- **多记录类型支持** — A、CNAME、MX、SOA、TXT 记录（TXT 简化对比：记录数量 + SPF 存在性检测）
+- **差异检测** — 以第一台查询成功的 DNS 为基线，逐一对比其他 DNS 的返回结果
+- **TLD Trace 参考检查** — 通过 `dig +trace`（root→TLD→权威）获取未经递归缓存的权威路径解析结果，仅展示/记录，不参与对比
 - **CNAME 链解析** — 递归跟踪 CNAME 链（最多 10 层）
 - **Prometheus 指标输出** — 支持 textfile collector 模式，自动写入 `.prom` 文件
 - **彩色终端输出** — 绿色=一致，黄色=差异，红色=错误
@@ -32,13 +33,23 @@
 
 | 名称 | IP |
 |------|-----|
+| SHG | 10.143.10.5 |
+| BJV | 10.144.10.5 |
 | 114 | 114.114.114.114 |
 | Ali | 223.5.5.5 |
-| Google | 8.8.8.8 |
-| Tencent | 119.29.29.29 |
 | Cloudflare | 1.1.1.1 |
 
 > 可在脚本顶部 `DNS_SERVERS` 变量中自行增删改。
+
+### TLD Trace（独立参考检查）
+
+v8.2 起 TLD 服务器不再参与常规对比，改为独立的 **TLD Trace 检查**：对每个监控域名执行 `dig +trace`，从 root 服务器开始沿委派链（root → TLD → 权威）逐级查询，得到**未经任何递归解析器缓存**的权威结果。
+
+- **仅参考，不对比**：结果单独一行青色显示（`TRACE (root→TLD→auth)`），不计入差异/错误统计
+- **网络要求**：监控主机需要能出站访问 root/TLD/权威服务器的 UDP 53 端口
+- **自动降级**：每轮开始探测一次 root 服务器，不可达则本轮自动跳过 trace（避免每个域名单独等待超时）
+- **并行模式**：trace 与其他 DNS 查询并发执行，不增加每轮总耗时
+- 开关：配置项 `ENABLE_TLD_TRACE` 或命令行 `--trace` / `--no-trace`
 
 ---
 
@@ -93,6 +104,8 @@
 | `--delay SECONDS` | 设置查询间延迟 | `2` |
 | `--domain-delay SECONDS` | 设置域名间延迟 | `3` |
 | `--prom-dir DIR` | 启用 Prometheus textfile collector 输出 | 默认禁用 |
+| `--trace` | 启用 TLD Trace 参考检查（dig +trace，仅记录不对比；root 不可达时自动跳过） | 开启 |
+| `--no-trace` | 关闭 TLD Trace 参考检查 | - |
 | `--stability-test COUNT` | 运行 MX 稳定性测试：每个 DNS 服务器查询 COUNT 次 | 默认禁用 |
 | `--mx-stability N` | Daemon 模式：每轮对 MX 域名额外查 N 次（轻量稳定性检查） | 默认禁用 |
 | `-h, --help` | 显示帮助信息 | - |
@@ -190,7 +203,7 @@ google.com
 | `dns_compare.prom` | 查询指标（延迟、错误、无记录、差异、变化检测、MX 稳定性） |
 | `dns_summary.prom` | 汇总指标（总数、差异数、错误数、时间戳） |
 
-> v8.0 已将原先的 12 个分离日志/CSV 文件合并为 2 个文件，大幅减少磁盘占用。`dns_query_result` 指标已移除（其高基数 label 值会导致 .prom 文件膨胀到 24MB+），解析结果请查看 CSV 和日志文件。
+> v8.0 已将原先的 12 个分离日志/CSV 文件合并为 2 个文件，大幅减少磁盘占用。`dns_query_result` 指标已恢复（用于 dashboard 展示解析结果）。v8.1 起 TXT 记录的 result label 为记录数量（如 `result="3"`），并附带 `has_spf="true|false"` label，不再输出完整 TXT 内容，避免了高基数膨胀问题。
 
 ---
 
@@ -204,7 +217,8 @@ google.com
 | `dns_query_error` | gauge | domain, server, record_type, category, country_code, error_type | 查询错误（1=失败, 0=正常），失败时 error_type 为错误信息 |
 | `dns_query_success` | gauge | domain, server, record_type, category, country_code | 查询成功状态（1=成功, 0=失败） |
 | `dns_query_nodata` | gauge | domain, server, record_type, category, country_code | 无数据（1=无记录, 0=有数据） |
-| `dns_query_difference` | gauge | domain, server, record_type, category | 与基线差异（1=不一致, 0=一致） |
+| `dns_query_result` | gauge | domain, server, record_type, category, result, country_code, has_spf(仅TXT) | 解析结果：A=IP、CNAME=链、MX=列表、TXT=记录数量；TXT 记录附带 `has_spf` label 表示是否存在 SPF（v=spf1）记录 |
+| `dns_query_difference` | gauge | domain, server, record_type, category | 与基线差异（1=不一致, 0=一致）；TXT 记录数量或 SPF 存在性不同即为差异 |
 | `dns_query_last_test_timestamp` | gauge | domain, server, record_type, category | 该域名/服务器/记录类型的上次测试时间戳 |
 | `dns_test_domains_total` | gauge | 无 | 本次测试域名总数 |
 | `dns_test_differences_total` | gauge | 无 | 有差异的域名数 |
@@ -214,6 +228,9 @@ google.com
 | `dns_change_detected` | gauge | domain, server, record_type, change_type, description | 变化检测（daemon 模式，值为 1），change_type=CHANGE/NEW/GONE/ERROR |
 | `dns_changes_total` | gauge | change_type | 本轮变化总数（daemon 模式），按类型分组：change/new/gone/error |
 | `dns_mx_stability` | gauge | domain, server, result_type | MX 稳定性测试结果，result_type=mx_ok/no_mx/servfail/empty/other/success_pct/total_queries |
+| `dns_trace_result` | gauge | domain, record_type, category, result | TLD Trace 权威路径解析结果（仅参考，不参与对比；TXT 为 count+spf 摘要，其他类型记录原始 rdata） |
+| `dns_trace_error` | gauge | domain, record_type, category, error_type | TLD Trace 失败（1=失败, 0=正常），不影响 dns_test_errors_total 统计 |
+| `dns_trace_duration_ms` | gauge | domain, record_type, category | TLD Trace 总耗时（毫秒，含 root→TLD→权威全部往返） |
 
 ### 6.2 差异检测逻辑
 

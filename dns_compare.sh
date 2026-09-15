@@ -1,9 +1,11 @@
 #!/bin/bash
 
 # ====================================================
-# Multi-DNS comparison test script v8.0
+# Multi-DNS comparison test script v8.2
 # - Removed ALL record type
-# - Added TXT record support with auto-categorization
+# - TXT monitoring simplified: compares record count + SPF presence (v=spf1) only
+# - TLD server removed from comparison; added independent TLD trace check
+#   (dig +trace, reference only, auto-disabled when root servers unreachable)
 # Usage: ./dns_compare.sh [options] [domain list file]
 # ====================================================
 
@@ -18,6 +20,11 @@ QUERY_TIMEOUT=5
 MAX_CNAME_DEPTH=10
 ENABLE_GEOIP=true
 LOCAL_GEOIP_CSV="IP2LOCATION-LITE-DB1.CSV"
+# TLD trace check (dig +trace: root -> TLD -> authoritative, bypasses resolver caches)
+# Reference only: results are displayed/recorded but NEVER compared or counted in stats
+# Requires outbound UDP/53 to root/TLD/authoritative servers; auto-disabled per round if unreachable
+ENABLE_TLD_TRACE=true
+TLD_TRACE_TIMEOUT=3
 # Prometheus textfile collector directory (empty = disabled)
 # node_exporter must be configured with --collector.textfile.directory pointing here
 PROMETHEUS_TEXTFILE_DIR="/run/textfile_collector"
@@ -29,7 +36,6 @@ BJV@10.144.10.5
 114@114.114.114.114
 Ali@223.5.5.5
 Cloudflare@1.1.1.1
-TLD@103.183.66.132
 "
 
 LOG_FILE="dns_run.log"
@@ -478,31 +484,22 @@ resolve_soa_record() {
     echo "$status|$qtime|$raw|$display|$err"
 }
 
-# TXT record categorizer
-# Classifies TXT strings by known prefix patterns
-# Usage: categorize_txt "txt_string"
-# Returns: category label (SPF, DMARC, DKIM, OTHER)
-categorize_txt() {
-    local txt="$1"
-    # Strip leading/trailing whitespace and quotes
-    txt=$(echo "$txt" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
-    case "$txt" in
-        v=spf1*) echo "SPF" ;;
-        v=DMARC1*) echo "DMARC" ;;
-        v=DKIM1*|k=rsa*|k=ed25519*) echo "DKIM" ;;
-        *) echo "OTHER" ;;
-    esac
-}
-
+# TXT record resolution (simplified)
+# Only compares: (1) number of TXT records, (2) SPF presence (v=spf1 prefix)
+# raw format: "count=N spf=true|false" (normalized, safe for string compare)
 resolve_txt_record() {
     local domain="$1" dns_ip="$2" dns_name="$3"
     local result=$(dig @"$dns_ip" "$domain" TXT +time="$QUERY_TIMEOUT" +tries="$QUERY_RETRIES" +stats 2>&1)
     local exit_code=$?
     local qtime=$(echo "$result" | grep "Query time:" | awk '{print $4}')
-    # Extract all TXT strings from ANSWER SECTION
+    # Extract all TXT strings from ANSWER SECTION (one record per line, quotes stripped)
     local txt_lines=$(echo "$result" | grep -E '^[a-zA-Z0-9].*[[:space:]]TXT[[:space:]]' | sed 's/^[^"]*"\(.*\)"/\1/' | sed 's/"[[:space:]]*"/ /g')
     local status="SUCCESS"
     local err=""
+    local count=0
+    local has_spf="false"
+    local raw="N/A"
+    local display="N/A"
     if [ $exit_code -ne 0 ]; then
         status="ERROR"; err="DNS query failed"
         echo "$result" | grep -q "connection timed out" && err="Connection timeout"
@@ -511,24 +508,107 @@ resolve_txt_record() {
         status="ERROR"; err="No response"
     elif [ -z "$txt_lines" ]; then
         status="NO_RECORD"; err="No TXT record"
+    else
+        # Count non-empty TXT record lines
+        count=$(echo "$txt_lines" | grep -c '[^[:space:]]')
+        # Detect SPF record presence (v=spf1 prefix)
+        echo "$txt_lines" | grep -qE '^[[:space:]]*v=spf1' && has_spf="true"
+        raw="count=${count} spf=${has_spf}"
+        display="TXT count: ${count}, SPF: ${has_spf}"
     fi
     [ -z "$qtime" ] && qtime="N/A"
-    [ -z "$txt_lines" ] && txt_lines="N/A"
-    # Format display: number each TXT entry with its category
-    local display=""
-    local idx=0
-    while IFS= read -r txt; do
-        [ -z "$txt" ] && continue
-        local cat=$(categorize_txt "$txt")
-        if [ -n "$display" ]; then
-            display="${display}; TXT[${idx}][${cat}]:${txt}"
+    echo "$status|$qtime|$raw|$display|$err"
+}
+
+# Millisecond timestamp (GNU date %N on Linux; falls back to seconds on BSD/macOS)
+_now_ms() {
+    local n=$(date +%s%N 2>/dev/null)
+    if [[ "$n" =~ ^[0-9]+$ ]]; then
+        echo $((n / 1000000))
+    else
+        echo $(( $(date +%s) * 1000 ))
+    fi
+}
+
+# TLD trace resolution (reference only — never compared against DNS servers)
+# Walks root -> TLD -> authoritative via dig +trace, bypassing recursive caches.
+# Returns: status|duration_ms|raw|display|err
+resolve_trace_record() {
+    local domain="$1" type="$2"
+    local t0=$(_now_ms)
+    local result=$(dig +trace +noall +answer "$domain" "$type" +time="$TLD_TRACE_TIMEOUT" +tries=1 2>&1)
+    local exit_code=$?
+    local dur=$(( $(_now_ms) - t0 ))
+    # +noall +answer: intermediate hops (root/TLD referrals) print nothing;
+    # only the final authoritative answer produces record lines
+    local answer_lines=$(echo "$result" | grep -v '^;' | grep -v '^[[:space:]]*$')
+    local status="SUCCESS"
+    local err=""
+    if [ $exit_code -ne 0 ] || echo "$result" | grep -q "no servers could be reached\|connection timed out"; then
+        status="ERROR"; err="Trace failed (root/TLD/authoritative unreachable or timeout)"
+    elif [ -z "$answer_lines" ]; then
+        status="NO_RECORD"; err="No answer from authoritative servers"
+    fi
+    local raw="N/A"
+    local display="N/A"
+    if [ "$status" = "SUCCESS" ]; then
+        if [ "$type" = "TXT" ]; then
+            # Same simplified summary as resolve_txt_record: count + SPF presence
+            local count=$(echo "$answer_lines" | grep -c '[^[:space:]]')
+            local has_spf="false"
+            echo "$answer_lines" | grep -q '"v=spf1' && has_spf="true"
+            raw="count=${count} spf=${has_spf}"
+            display="TXT count: ${count}, SPF: ${has_spf}"
         else
-            display="TXT[${idx}][${cat}]:${txt}"
+            # Strip name/ttl/class/type prefix, keep rdata; join multiple records with ';'
+            raw=$(echo "$answer_lines" | awk '{line=""; for(i=5;i<=NF;i++) line=line $i (i<NF?" ":""); print line}' | paste -sd ';' -)
+            display="$raw"
+            if [ -z "$raw" ]; then
+                status="NO_RECORD"; raw="N/A"; display="N/A"; err="No record in trace answer"
+            fi
         fi
-        ((idx++))
-    done <<< "$txt_lines"
-    [ -z "$display" ] && display="N/A"
-    echo "$status|$qtime|$txt_lines|$display|$err"
+    fi
+    echo "$status|$dur|$raw|$display|$err"
+}
+
+# Process TLD trace result: terminal display, CSV row, Prometheus trace metrics.
+# Reference only: never compared, never counted in diff/err/no_record stats.
+handle_trace_result() {
+    local domain="$1" type="$2" category="$3" tr="$4"
+    local status=$(echo "$tr" | cut -d'|' -f1)
+    local dur=$(echo "$tr" | cut -d'|' -f2)
+    local raw=$(echo "$tr" | cut -d'|' -f3)
+    local display=$(echo "$tr" | cut -d'|' -f4)
+    local err=$(echo "$tr" | cut -d'|' -f5)
+    case "$status" in
+        SUCCESS)
+            log "  ${BOLD_CYAN}TRACE${NC} ${CYAN}(root→TLD→auth) : ${dur}ms | ${display}  [reference only]${NC}"
+            echo "$domain,TRACE,N/A,$type,$display" >> "$RESULTS_CSV"
+            ;;
+        NO_RECORD)
+            log "  ${YELLOW}TRACE (root→TLD→auth) : ${dur}ms | No answer from authoritative servers [reference only]${NC}"
+            echo "$domain,TRACE,N/A,$type,NO RECORD" >> "$RESULTS_CSV"
+            ;;
+        ERROR)
+            log "  ${YELLOW}TRACE (root→TLD→auth) : ${dur}ms | [ERROR: $err] [reference only]${NC}"
+            echo "$domain,TRACE,N/A,$type,N/A" >> "$RESULTS_CSV"
+            ;;
+    esac
+    # Prometheus trace metrics (independent family — not used by existing panels/alerts)
+    if [ -n "$PROM_METRICS_FILE" ]; then
+        local esc_domain=$(prom_escape "$domain")
+        local esc_rt=$(prom_escape "$type")
+        local esc_cat=$(prom_escape "$category")
+        PROM_TRACE_DURATION_LINES+=("dns_trace_duration_ms{domain=\"$esc_domain\",record_type=\"$esc_rt\",category=\"$esc_cat\"} $dur")
+        if [ "$status" = "ERROR" ]; then
+            PROM_TRACE_ERROR_LINES+=("dns_trace_error{domain=\"$esc_domain\",record_type=\"$esc_rt\",category=\"$esc_cat\",error_type=\"$(prom_escape "$err")\"} 1")
+        else
+            PROM_TRACE_ERROR_LINES+=("dns_trace_error{domain=\"$esc_domain\",record_type=\"$esc_rt\",category=\"$esc_cat\",error_type=\"\"} 0")
+            local safe_raw=$(prom_escape "$raw")
+            [ "$status" = "NO_RECORD" ] && safe_raw="NO_RECORD"
+            PROM_TRACE_RESULT_LINES+=("dns_trace_result{domain=\"$esc_domain\",record_type=\"$esc_rt\",category=\"$esc_cat\",result=\"$safe_raw\"} 1")
+        fi
+    fi
 }
 
 resolve_domain() {
@@ -593,14 +673,19 @@ display_results() {
     local baseline=""
     local has_differences=0
 
-    # Collect baseline from first DNS server
+    # Collect baseline from first DNS server that returned SUCCESS
+    # (skips leading ERROR/NO_RECORD servers so comparison still works if they are down)
     for r in "${results[@]}"; do
         local rt=$(echo "$r" | cut -d'|' -f3)
         [ "$rt" != "$record_type" ] && continue
         local status=$(echo "$r" | cut -d'|' -f4)
+        [ "$status" != "SUCCESS" ] && continue
         local raw=$(echo "$r" | cut -d'|' -f6)
-        [ -z "$baseline" ] && [ "$status" = "SUCCESS" ] && baseline="$raw"
-        [ "$rt" = "CNAME" ] && [ "$status" = "SUCCESS" ] && baseline=$(extract_chain_only "$raw")
+        if [ "$rt" = "CNAME" ]; then
+            baseline=$(extract_chain_only "$raw")
+        else
+            baseline="$raw"
+        fi
         break
     done
 
@@ -721,6 +806,10 @@ init_prometheus() {
     PROM_CHANGE_COUNT_ERR=0
     # MX stability metrics accumulators
     PROM_MX_STABILITY_LINES=()
+    # TLD trace metrics accumulators (reference only)
+    PROM_TRACE_RESULT_LINES=()
+    PROM_TRACE_ERROR_LINES=()
+    PROM_TRACE_DURATION_LINES=()
 }
 
 emit_dns_prometheus() {
@@ -786,8 +875,15 @@ emit_dns_prometheus() {
                 PROM_ERROR_LINES+=("dns_query_error{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",error_type=\"\"} 0")
                 PROM_SUCCESS_LINES+=("dns_query_success{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 1")
                 PROM_NODATA_LINES+=("dns_query_nodata{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",country_code=\"$country_code\"} 0")
-                local safe_result=$(prom_escape "$raw")
-                PROM_RESULT_LINES+=("dns_query_result{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
+                if [ "$rt" = "TXT" ]; then
+                    # TXT raw is "count=N spf=true|false": expose count as result, SPF as has_spf label
+                    local txt_count="${raw#count=}"; txt_count="${txt_count%% *}"
+                    local txt_spf="${raw##*spf=}"
+                    PROM_RESULT_LINES+=("dns_query_result{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",result=\"$txt_count\",has_spf=\"$txt_spf\",country_code=\"$country_code\"} 1")
+                else
+                    local safe_result=$(prom_escape "$raw")
+                    PROM_RESULT_LINES+=("dns_query_result{domain=\"$esc_domain\",server=\"$esc_server\",record_type=\"$esc_rt\",category=\"$esc_category\",result=\"$safe_result\",country_code=\"$country_code\"} 1")
+                fi
                 ;;
             ERROR)
                 local err_msg=$(prom_escape "$(echo "$r" | cut -d'|' -f8)")
@@ -832,8 +928,15 @@ write_prometheus_final() {
             srv_values+=("STATUS:${status}|RAW:${raw}")
         done < "$tmp_file"
 
-        # First server is baseline
+        # Baseline = first server with SUCCESS status (fall back to first server if none succeeded)
         baseline_value="${srv_values[0]}"
+        local bidx=0
+        for ((bidx=0; bidx<${#srv_values[@]}; bidx++)); do
+            if [[ "${srv_values[$bidx]}" == STATUS:SUCCESS* ]]; then
+                baseline_value="${srv_values[$bidx]}"
+                break
+            fi
+        done
         local esc_domain=$(prom_escape "$domain")
         local esc_rt=$(prom_escape "$record_type")
         local esc_cat=$(prom_escape "$category")
@@ -866,7 +969,7 @@ write_prometheus_final() {
         echo "# TYPE dns_query_nodata gauge"
         printf '%s\n' "${PROM_NODATA_LINES[@]}"
         echo ""
-        echo "# HELP dns_query_result DNS query result value (A record IP, CNAME chain, or MX list)"
+        echo "# HELP dns_query_result DNS query result value (A record IP, CNAME chain, MX list, or TXT record count with has_spf label)"
         echo "# TYPE dns_query_result gauge"
         printf '%s\n' "${PROM_RESULT_LINES[@]}"
         echo ""
@@ -890,6 +993,24 @@ write_prometheus_final() {
             echo "# HELP dns_mx_stability MX record stability test result distribution"
             echo "# TYPE dns_mx_stability gauge"
             printf '%s\n' "${PROM_MX_STABILITY_LINES[@]}"
+        fi
+        if [ ${#PROM_TRACE_DURATION_LINES[@]} -gt 0 ]; then
+            echo ""
+            echo "# HELP dns_trace_duration_ms TLD trace (dig +trace) total duration in milliseconds"
+            echo "# TYPE dns_trace_duration_ms gauge"
+            printf '%s\n' "${PROM_TRACE_DURATION_LINES[@]}"
+        fi
+        if [ ${#PROM_TRACE_ERROR_LINES[@]} -gt 0 ]; then
+            echo ""
+            echo "# HELP dns_trace_error TLD trace failure (1=failed, 0=ok); reference check, not part of comparison"
+            echo "# TYPE dns_trace_error gauge"
+            printf '%s\n' "${PROM_TRACE_ERROR_LINES[@]}"
+        fi
+        if [ ${#PROM_TRACE_RESULT_LINES[@]} -gt 0 ]; then
+            echo ""
+            echo "# HELP dns_trace_result Authoritative-path result via dig +trace (reference only, not compared)"
+            echo "# TYPE dns_trace_result gauge"
+            printf '%s\n' "${PROM_TRACE_RESULT_LINES[@]}"
         fi
     } > "$PROM_METRICS_FILE" 2>/dev/null
 
@@ -950,7 +1071,7 @@ wait_with_countdown() {
 
 show_help() {
     cat << EOF
-Multi-DNS Comparison Test v8.0
+Multi-DNS Comparison Test v8.2
 
 Usage: $0 [options] [domain list file]
 
@@ -968,6 +1089,11 @@ Options:
   --domain-delay SECONDS   Set delay between domains (default: $DOMAIN_DELAY)
   --parallel               Run DNS queries for each domain in parallel (default)
   --no-parallel            Force sequential queries (old behavior)
+  --trace                  Enable TLD trace check via dig +trace (default)
+                           Reference only: root->TLD->authoritative result is
+                           displayed/recorded but never compared. Auto-skipped
+                           when root servers are unreachable.
+  --no-trace               Disable TLD trace check
   --prom-dir DIR           Enable Prometheus textfile collector output directory
   --stability-test COUNT   Run MX stability test: query each DNS server COUNT times and show result distribution
   --mx-stability N         Daemon mode: per-round lightweight MX stability check (N queries per MX domain)
@@ -977,7 +1103,7 @@ Record Types:
   CNAME  - Canonical Name records (shows full chain)
   MX     - Mail Exchange records
   SOA    - Start of Authority records (shows full AUTHORITY SECTION line)
-  TXT    - Text records (auto-categorized: SPF/DMARC/DKIM/OTHER)
+  TXT    - Text records (compares record count + SPF presence only)
 
 Daemon Mode Options:
   --daemon               Run in continuous monitoring mode (does not exit)
@@ -1150,7 +1276,7 @@ run_one_round() {
     if [ "$DAEMON_MODE" = "true" ] && [ "$round_num" -gt 1 ]; then
         echo "\n--- Round $round_num ---" >> "$LOG_FILE"
     else
-        echo "Multi-DNS Comparison Test v8.0 - $(date)" > "$LOG_FILE"
+        echo "Multi-DNS Comparison Test v8.2 - $(date)" > "$LOG_FILE"
         [ -n "$DOMAIN_FILE" ] && echo "Domain file: $DOMAIN_FILE" >> "$LOG_FILE"
         [ ${#CMD_DOMAINS[@]} -gt 0 ] && echo "Command-line domains:" >> "$LOG_FILE"
         for i in "${!CMD_DOMAINS[@]}"; do
@@ -1180,6 +1306,9 @@ run_one_round() {
     PROM_NODATA_LINES=()
     PROM_RESULT_LINES=()
     PROM_TIMESTAMP_LINES=()
+    PROM_TRACE_RESULT_LINES=()
+    PROM_TRACE_ERROR_LINES=()
+    PROM_TRACE_DURATION_LINES=()
     # Clean up old temp files from previous round
     for old_tmp in "${PROM_RAW_TMP[@]}"; do
         rm -f "$old_tmp" 2>/dev/null
@@ -1189,6 +1318,17 @@ run_one_round() {
 
     # Create shared temp directory for parallel queries in this round
     PARALLEL_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/dns_compare.XXXXXX")
+
+    # TLD trace pre-check: probe one root server per round.
+    # If unreachable, skip trace for this round (avoids per-domain timeout delays).
+    TLD_TRACE_OK=0
+    if [ "$ENABLE_TLD_TRACE" = "true" ]; then
+        if dig @a.root-servers.net . NS +time=2 +tries=1 +noall +answer >/dev/null 2>&1; then
+            TLD_TRACE_OK=1
+        else
+            log "${YELLOW}  TLD trace skipped this round: root servers unreachable (requires outbound UDP/53 to root/TLD/authoritative servers)${NC}"
+        fi
+    fi
 
     # Decide parallel vs sequential for this round
     local use_parallel=0
@@ -1204,6 +1344,7 @@ run_one_round() {
 
         log "\n${BLUE}[$((++current))/$total] Testing domain: $domain ($type) — ${#dns_names[@]} DNS servers${NC}"
         results=()
+        trace_res=""
         has_err=0
         has_no=0
 
@@ -1218,6 +1359,11 @@ run_one_round() {
                     resolve_domain "$domain" "${dns_ips[$i]}" "${dns_names[$i]}" "$type" > "$pdir/$i"
                 ) &
             done
+
+            # Launch TLD trace alongside DNS queries (reference only, adds no extra round time)
+            if [ "$ENABLE_TLD_TRACE" = "true" ] && [ "$TLD_TRACE_OK" = "1" ]; then
+                ( resolve_trace_record "$domain" "$type" > "$pdir/trace" ) &
+            fi
 
             # Wait for all background jobs to complete
             wait
@@ -1243,6 +1389,9 @@ run_one_round() {
                     compare_with_snapshot "$domain" "$type" "${dns_names[$i]}" "$status" "$raw"
                 fi
             done
+
+            # Collect TLD trace result before cleanup
+            [ -f "$pdir/trace" ] && trace_res=$(cat "$pdir/trace")
 
             rm -rf "$pdir"
 
@@ -1276,6 +1425,11 @@ run_one_round() {
                     fi
                 fi
             done
+
+            # TLD trace (reference only) — sequential mode
+            if [ "$ENABLE_TLD_TRACE" = "true" ] && [ "$TLD_TRACE_OK" = "1" ]; then
+                trace_res=$(resolve_trace_record "$domain" "$type")
+            fi
         fi
         display_results "$domain" "$type" "$cat" "${results[@]}"
         diff=$?
@@ -1284,6 +1438,8 @@ run_one_round() {
         [ $has_no -eq 1 ] && ((no_record_cnt++))
         write_to_csv "$domain" "$type" "${results[@]}"
         emit_dns_prometheus "$domain" "$type" "$cat" "$diff" "${results[@]}"
+        # TLD trace output (reference only — not compared, not counted in stats)
+        [ -n "$trace_res" ] && handle_trace_result "$domain" "$type" "$cat" "$trace_res"
         if [ $current -lt $total ]; then
             if [ $VERBOSE -eq 1 ]; then
                 wait_with_countdown $DOMAIN_DELAY "Domain delay"
@@ -1387,6 +1543,7 @@ CMD_DOMAINS=()
 CMD_TYPES=()
 CURRENT_TYPE=""
 ENABLE_GEOIP=true
+TLD_TRACE_OK=0
 
 # Daemon mode variables
 DAEMON_MODE=false
@@ -1422,6 +1579,8 @@ while [[ $# -gt 0 ]]; do
         --domain-delay) DOMAIN_DELAY="$2"; shift 2 ;;
         --parallel)      PARALLEL_QUERIES=1; shift ;;
         --no-parallel)   PARALLEL_QUERIES=0; shift ;;
+        --trace)         ENABLE_TLD_TRACE=true; shift ;;
+        --no-trace)      ENABLE_TLD_TRACE=false; shift ;;
         --prom-dir) PROMETHEUS_TEXTFILE_DIR="$2"; shift 2 ;;
         --daemon) DAEMON_MODE=true; shift ;;
         --interval) DAEMON_INTERVAL="$2"; shift 2 ;;
